@@ -13,13 +13,20 @@ ENV SPEECHBRAIN_CACHE=/data/cache/speechbrain
 
 # System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git libsndfile1 ffmpeg \
+    git libsndfile1 ffmpeg curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Create non-root user; pre-create cache dirs with correct ownership
+RUN groupadd -r app && useradd -r -g app -d /app app \
+    && mkdir -p /data/cache /data/logs \
+    && chown -R app:app /app /data
+
 COPY src/*.py /app/
+
+USER app
 
 EXPOSE 8000
 
