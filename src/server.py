@@ -461,8 +461,14 @@ async def websocket_transcribe(websocket: WebSocket):
     await websocket.accept()
 
     ws_req_id = websocket.query_params.get("request_id") or str(_uuid_module.uuid4())
+    ws_id = ws_req_id[:12]
     token = set_request_id(ws_req_id)
-    log.info("[WS] Client connected")
+
+    t_connect = time.time()
+    msg_count = 0
+    audio_frame_count = 0
+
+    log.bind(ws_id=ws_id).info("ws_connected")
 
     audio_buffer = bytearray()
     audio_window = bytearray()
@@ -499,6 +505,7 @@ async def websocket_transcribe(websocket: WebSocket):
         while True:
             try:
                 data = await websocket.receive()
+                msg_count += 1
 
                 if data.get("type") == "websocket.disconnect":
                     break
@@ -509,16 +516,22 @@ async def websocket_transcribe(websocket: WebSocket):
                         action = msg.get("action", "")
 
                         if action == "flush":
+                            log.bind(ws_id=ws_id, window_s=round(len(audio_window) / TARGET_SR / 2, 2) if len(audio_window) > 0 else 0).info("ws_flush")
                             if audio_buffer:
                                 audio_window.extend(audio_buffer)
                                 audio_buffer.clear()
 
                             if len(audio_window) > 0:
+                                t_infer = time.time()
                                 text, _ = await _transcribe_with_context(
                                     bytes(audio_window), b"", pad_silence=True,
                                     lang_code=lang_code, use_vad=use_vad,
                                 )
+                                inference_ms = (time.time() - t_infer) * 1000
                                 chunk_count += 1
+                                if text.strip():
+                                    log.bind(ws_id=ws_id, text=text[:80], text_len=len(text.strip()),
+                                             is_final=True, inference_ms=round(inference_ms)).debug("transcript")
                                 await websocket.send_json({
                                     "text": text,
                                     "is_partial": False,
@@ -533,6 +546,7 @@ async def websocket_transcribe(websocket: WebSocket):
                             audio_window.clear()
 
                         elif action == "reset":
+                            log.bind(ws_id=ws_id).info("ws_reset")
                             audio_buffer.clear()
                             audio_window.clear()
                             await websocket.send_json({"status": "buffer_reset"})
@@ -545,6 +559,7 @@ async def websocket_transcribe(websocket: WebSocket):
                                 lang_code = new_lang
                             if "use_server_vad" in msg:
                                 use_vad = bool(msg["use_server_vad"])
+                            log.bind(ws_id=ws_id, language=lang_code or "auto", use_server_vad=use_vad).info("ws_configured")
                             await websocket.send_json({
                                 "status": "configured",
                                 "language": lang_code or "auto",
@@ -566,6 +581,7 @@ async def websocket_transcribe(websocket: WebSocket):
                         })
 
                 elif "bytes" in data:
+                    audio_frame_count += 1
                     incoming = data["bytes"]
                     if client_sr != TARGET_SR:
                         incoming = _resample_pcm_bytes(incoming, client_sr)
@@ -589,12 +605,17 @@ async def websocket_transcribe(websocket: WebSocket):
                             if not _current_has_speech and _ws_prev_had_speech:
                                 _ws_prev_had_speech = False
                                 _vad_flushed = True
+                                t_infer = time.time()
                                 text, _ = await _transcribe_with_context(
                                     bytes(audio_window), b"", pad_silence=True,
                                     lang_code=lang_code, use_vad=use_vad,
                                 )
+                                inference_ms = (time.time() - t_infer) * 1000
                                 chunk_count += 1
                                 if text:
+                                    if text.strip():
+                                        log.bind(ws_id=ws_id, text=text[:80], text_len=len(text.strip()),
+                                                 is_final=True, inference_ms=round(inference_ms)).debug("transcript")
                                     await websocket.send_json({
                                         "text": text,
                                         "is_partial": False,
@@ -605,12 +626,17 @@ async def websocket_transcribe(websocket: WebSocket):
                                 _ws_prev_had_speech = _current_has_speech
 
                         if not _vad_flushed:
+                            t_infer = time.time()
                             text, _ = await _transcribe_with_context(
                                 bytes(audio_window), b"", pad_silence=False,
                                 lang_code=lang_code, use_vad=use_vad,
                             )
+                            inference_ms = (time.time() - t_infer) * 1000
                             chunk_count += 1
                             if text:
+                                if text.strip():
+                                    log.bind(ws_id=ws_id, text=text[:80], text_len=len(text.strip()),
+                                             is_final=False, inference_ms=round(inference_ms)).debug("transcript")
                                 await websocket.send_json({
                                     "text": text,
                                     "is_partial": True,
@@ -631,7 +657,6 @@ async def websocket_transcribe(websocket: WebSocket):
                             log.info("[WS] Final transcription on disconnect: {}", text)
                     except Exception:
                         pass
-                log.info("[WS] Client disconnected | chunks_processed={}", chunk_count)
                 break
 
     except Exception as e:
@@ -641,6 +666,8 @@ async def websocket_transcribe(websocket: WebSocket):
         except Exception:
             pass
     finally:
+        log.bind(ws_id=ws_id, total_messages=msg_count, total_audio_frames=audio_frame_count,
+                 duration_s=round(time.time() - t_connect, 1)).info("ws_disconnected")
         reset_request_id(token)
         try:
             await websocket.close()

@@ -50,6 +50,8 @@ def load_all_models():
     if _models_loaded:
         return
 
+    t_load_start = time.time()
+
     # -- STT_DEVICE note ------------------------------------------------
     stt_device_val = os.getenv("STT_DEVICE", "")
     if stt_device_val:
@@ -122,7 +124,12 @@ def load_all_models():
 
     _models_loaded = True
     _last_used = time.time()
-    log.info("All models loaded!")
+    elapsed_ms = round((time.time() - t_load_start) * 1000)
+    import torch
+    gpu_mb = 0
+    if torch.cuda.is_available():
+        gpu_mb = round(torch.cuda.memory_allocated(0) / 1024 / 1024)
+    log.bind(elapsed_ms=elapsed_ms, gpu_allocated_mb=gpu_mb).info("models_loaded")
 
 
 def unload_all_models():
