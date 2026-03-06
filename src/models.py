@@ -80,7 +80,7 @@ def load_all_models():
         from speechbrain.inference.classifiers import EncoderClassifier
         _lid_classifier = EncoderClassifier.from_hparams(
             source="speechbrain/lang-id-voxlingua107-ecapa",
-            savedir="/root/.cache/speechbrain-lid",
+            savedir=os.getenv("SPEECHBRAIN_CACHE", "/data/cache/speechbrain"),
             run_opts={"device": lid_device},
         )
         log.info("SpeechBrain LID loaded (107 languages)")

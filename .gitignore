@@ -1,7 +1,8 @@
 # Environment
 .env
 
-# Model cache
+# Runtime data (model cache, logs)
+data/
 models/
 
 # Python
