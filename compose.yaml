@@ -1,0 +1,42 @@
+services:
+  moonshine-asr:
+    build:
+      context: .
+    image: moonshine-asr-local:cuda124
+    container_name: moonshine-asr
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8200}:8000"
+    volumes:
+      - ./models:/root/.cache/huggingface
+    env_file:
+      - .env
+    networks:
+      - moonshine-asr-net
+      - freepbx-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+    healthcheck:
+      test: [ "CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+networks:
+  moonshine-asr-net:
+    driver: bridge
+    name: moonshine-asr-net
+  freepbx-net:
+    external: true
+    name: freepbx-net

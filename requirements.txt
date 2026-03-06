@@ -1,0 +1,14 @@
+fastapi==0.133.1
+uvicorn==0.41.0
+python-multipart==0.0.22
+websockets==16.0
+soundfile==0.13.1
+numpy
+scipy
+noisereduce
+silero-vad==6.2.1
+loguru==0.7.3
+librosa
+moonshine-voice
+speechbrain==1.0.3
+huggingface_hub<1.0
