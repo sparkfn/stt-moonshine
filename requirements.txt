@@ -12,3 +12,6 @@ librosa
 moonshine-voice
 speechbrain==1.0.3
 huggingface_hub<1.0
+orjson>=3.9
+uvloop>=0.19
+httptools>=0.6

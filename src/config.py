@@ -9,7 +9,7 @@ def _safe_float(name: str, default: str) -> float:
     try:
         return float(raw)
     except ValueError:
-        log.error("Config error: {} must be a float, got '{}' -- using default {}", name, raw, default)
+        log.bind(key=name, value=raw, default=default).error("config_invalid_float")
         return float(default)
 
 
@@ -18,7 +18,7 @@ def _safe_int(name: str, default: str) -> int:
     try:
         return int(raw)
     except ValueError:
-        log.error("Config error: {} must be an integer, got '{}' -- using default {}", name, raw, default)
+        log.bind(key=name, value=raw, default=default).error("config_invalid_int")
         return int(default)
 
 
@@ -72,7 +72,7 @@ def validate_env() -> None:
 
     if errors:
         for err in errors:
-            log.error("Config validation failed: {}", err)
+            log.bind(detail=err).error("config_validation_failed")
         sys.exit(1)
 
-    log.info("Config validation passed")
+    log.info("config_validated")

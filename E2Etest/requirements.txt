@@ -1,0 +1,24 @@
+# E2E Test requirements for Qwen3-ASR
+# Install with: pip install -r E2Etest/requirements.txt
+# Pinned to latest Python 3.8-compatible versions as of 2026-02-24
+
+# Core testing framework
+pytest==8.3.5
+pytest-asyncio==0.24.0
+pytest-timeout==2.4.0
+
+# HTTP client
+httpx==0.28.1
+
+# WebSocket client
+websockets==13.1
+
+# Audio processing
+numpy==1.24.4
+soundfile==0.13.1
+
+# Utilities
+psutil==7.2.2
+
+# Audio download (for download_test_audio.py only)
+datasets==3.1.0

@@ -1,9 +1,20 @@
 from __future__ import annotations
 import contextvars
-import json
 import logging
 import os
 import sys
+
+try:
+    import orjson
+
+    def _dumps(obj: dict) -> bytes:
+        return orjson.dumps(obj, default=str)
+except ImportError:
+    import json
+
+    def _dumps(obj: dict) -> bytes:
+        return json.dumps(obj, default=str).encode()
+
 from loguru import logger
 
 _request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -28,6 +39,9 @@ _LEVEL_MAP = {
     "warning": "warn",
 }
 
+_NL = b"\n"
+_stdout_buf = sys.stdout.buffer
+
 
 def _json_sink(message: "loguru.Message") -> None:
     record = message.record
@@ -43,11 +57,12 @@ def _json_sink(message: "loguru.Message") -> None:
         entry["requestId"] = req_id
     extra = record.get("extra", {})
     if extra:
-        entry.update({k: v for k, v in extra.items()})
-    if record["exception"]:
-        entry["err"] = str(record["exception"].value)
-    sys.stdout.write(json.dumps(entry) + "\n")
-    sys.stdout.flush()
+        entry.update(extra)
+    exc = record["exception"]
+    if exc:
+        entry["err"] = str(exc.value)
+    _stdout_buf.write(_dumps(entry) + _NL)
+    _stdout_buf.flush()
 
 
 class InterceptHandler(logging.Handler):

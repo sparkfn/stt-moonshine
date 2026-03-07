@@ -6,6 +6,10 @@ ENV PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 ENV OMP_NUM_THREADS=1
 ENV MKL_NUM_THREADS=1
 
+# ONNX Runtime: max graph optimization, parallel execution
+ENV ONNXRUNTIME_SESSION_GRAPH_OPTIMIZATION_LEVEL=99
+ENV ONNXRUNTIME_EXECUTION_MODE=1
+
 # All model caches under one tree for easy bind-mounting
 ENV HF_HOME=/data/cache/huggingface
 ENV MOONSHINE_VOICE_CACHE=/data/cache/moonshine
@@ -30,4 +34,6 @@ USER app
 
 EXPOSE 8000
 
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000", "--ws", "websockets"]
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000", \
+     "--ws", "websockets", "--loop", "uvloop", "--http", "httptools", \
+     "--no-access-log"]

@@ -1,6 +1,7 @@
 """Voice pipeline: denoise -> VAD -> LID -> route -> STT."""
 from __future__ import annotations
 import os
+import time
 import numpy as np
 from logger import log
 import models
@@ -8,20 +9,32 @@ import models
 TARGET_SR = 16000
 DENOISE_ENABLED = os.getenv("DENOISE_ENABLED", "true").lower() == "true"
 
+# Pre-import noisereduce at module level (avoids per-call import overhead)
+_nr = None
+if DENOISE_ENABLED:
+    try:
+        import noisereduce as _nr
+    except ImportError:
+        pass
+
 
 def denoise(audio: np.ndarray, sr: int) -> np.ndarray:
     """Apply noise reduction if enabled."""
-    if not DENOISE_ENABLED:
+    if _nr is None:
         return audio
     try:
-        import noisereduce as nr
-        return nr.reduce_noise(y=audio, sr=sr, stationary=True)
+        return _nr.reduce_noise(y=audio, sr=sr, stationary=True)
     except Exception as e:
-        log.debug("Denoise failed, using raw audio: {}", e)
+        log.bind(error=str(e)).debug("denoise_skipped")
         return audio
 
 
-def process_audio(audio: np.ndarray, sr: int, lang_code: str | None = None) -> tuple[str, str]:
+def process_audio(
+    audio: np.ndarray,
+    sr: int,
+    lang_code: str | None = None,
+    skip_denoise: bool = False,
+) -> tuple[str, str]:
     """
     Full pipeline: denoise -> transcribe with language routing.
 
@@ -29,12 +42,16 @@ def process_audio(audio: np.ndarray, sr: int, lang_code: str | None = None) -> t
         audio: float32 audio array
         sr: sample rate
         lang_code: language override (None = auto-detect)
+        skip_denoise: skip noisereduce (e.g. WS path already bandpass-filtered)
 
     Returns:
         (transcribed_text, detected_language)
     """
-    # Step 1: Denoise
-    audio = denoise(audio, sr)
+    t0 = time.time()
+
+    # Step 1: Denoise (skip for pre-filtered audio)
+    if not skip_denoise:
+        audio = denoise(audio, sr)
 
     # Step 2: Determine language
     if lang_code is None or lang_code == "auto":
@@ -50,6 +67,14 @@ def process_audio(audio: np.ndarray, sr: int, lang_code: str | None = None) -> t
         if detected_lang not in ("en", "zh"):
             detected_lang = "en"
 
+    elapsed_ms = round((time.time() - t0) * 1000)
+    log.bind(
+        lang=detected_lang,
+        audio_s=round(len(audio) / sr, 2),
+        text_len=len(text),
+        elapsed_ms=elapsed_ms,
+    ).debug("pipeline_transcribed")
+
     return text, detected_lang
 
 
@@ -61,6 +86,8 @@ def process_audio_vad(audio: np.ndarray, sr: int, lang_code: str | None = None) 
     import torch
     from silero_vad import get_speech_timestamps
 
+    t0 = time.time()
+
     # Step 1: Denoise
     audio = denoise(audio, sr)
 
@@ -68,12 +95,12 @@ def process_audio_vad(audio: np.ndarray, sr: int, lang_code: str | None = None) 
     tensor = torch.from_numpy(audio)
     vad_model = models.get_vad_model()
     if vad_model is None:
-        return process_audio(audio, sr, lang_code)
+        return process_audio(audio, sr, lang_code, skip_denoise=True)
 
     try:
         timestamps = get_speech_timestamps(tensor, vad_model, sampling_rate=sr)
     except Exception:
-        return process_audio(audio, sr, lang_code)
+        return process_audio(audio, sr, lang_code, skip_denoise=True)
 
     if not timestamps:
         return "", lang_code or "en"
@@ -100,4 +127,13 @@ def process_audio_vad(audio: np.ndarray, sr: int, lang_code: str | None = None) 
         if text:
             texts.append(text)
 
-    return " ".join(texts), detected_lang or "en"
+    result = " ".join(texts)
+    elapsed_ms = round((time.time() - t0) * 1000)
+    log.bind(
+        segments=len(timestamps),
+        lang=detected_lang or "en",
+        text_len=len(result),
+        elapsed_ms=elapsed_ms,
+    ).debug("pipeline_vad_transcribed")
+
+    return result, detected_lang or "en"
