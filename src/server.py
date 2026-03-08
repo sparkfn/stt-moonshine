@@ -74,9 +74,9 @@ def _normalize_lang_input(language: str) -> str | None:
 
 def _format_lang_output(detected: str, requested: str) -> str:
     """Format language for response. Echo back client's format if explicit."""
-    if requested.lower() not in ("auto", ""):
-        return requested
-    return _LANG_CODE_TO_NAME.get(detected, detected)
+    if requested is None or requested.lower() in ("auto", ""):
+        return _LANG_CODE_TO_NAME.get(detected, detected)
+    return requested
 
 
 def _telephony_bandpass(audio: np.ndarray) -> np.ndarray:

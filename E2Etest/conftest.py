@@ -190,23 +190,28 @@ class MarkdownReportGenerator:
         for r in self.results:
             if not r["stdout"]:
                 continue
-            entry: dict = {"test": r["nodeid"].split("::")[-1], "status": r["outcome"]}
+            base: dict = {"test": r["nodeid"].split("::")[-1], "status": r["outcome"]}
+            language = None
+            reference = None
+            hypothesis = None
             for line in r["stdout"].splitlines():
                 m = re.match(r"Language:\s*(.+)", line)
                 if m:
-                    entry["language"] = m.group(1).strip()
-                m = re.match(r"(WER|CER):\s*([\d.]+)%", line)
-                if m:
-                    entry["metric"] = m.group(1)
-                    entry["value"] = float(m.group(2))
+                    language = m.group(1).strip()
                 m = re.match(r"Reference:\s*(.+)", line)
                 if m:
-                    entry["reference"] = m.group(1).strip()
+                    reference = m.group(1).strip()
                 m = re.match(r"Hypothesis:\s*(.+)", line)
                 if m:
-                    entry["hypothesis"] = m.group(1).strip()
-            if "language" in entry and "metric" in entry:
-                metrics.append(entry)
+                    hypothesis = m.group(1).strip()
+                m = re.match(r"(WER|CER):\s*([\d.]+)%", line)
+                if m:
+                    entry = {**base, "language": language, "metric": m.group(1), "value": float(m.group(2))}
+                    if reference:
+                        entry["reference"] = reference
+                    if hypothesis:
+                        entry["hypothesis"] = hypothesis
+                    metrics.append(entry)
         return metrics
 
     def _parse_transcription_results(self) -> list[dict]:

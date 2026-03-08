@@ -262,13 +262,13 @@ class ASRWebSocketClient:
         # Read audio file
         audio, sr = sf.read(str(audio_path), dtype="int16")
 
+        # Convert to mono if stereo (must happen before resample)
+        if len(audio.shape) > 1:
+            audio = audio.mean(axis=1).astype(np.int16)
+
         # Resample if needed (simple downsample)
         if sr != 16000:
             audio = self._resample(audio, sr, 16000)
-
-        # Convert to mono if stereo
-        if len(audio.shape) > 1:
-            audio = audio.mean(axis=1).astype(np.int16)
 
         # Calculate chunk sizes
         bytes_per_sample = 2  # int16
