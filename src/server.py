@@ -558,6 +558,12 @@ async def websocket_transcribe(websocket: WebSocket):
         redemption_ms=400, min_speech_ms=250,
     ) if use_vad else None
 
+    # Timeout for receive() when VAD speech is active — if no audio arrives
+    # within this window, assume the client stopped sending and force speech_end.
+    # Many clients stop forwarding audio when their own VAD detects silence,
+    # so the server never sees silence frames to trigger speech_end normally.
+    _VAD_RECV_TIMEOUT = 0.6  # seconds (slightly above redemption_ms=400)
+
     # Local references for hot-loop performance
     _frombuffer = np.frombuffer
     _ws_send_text = websocket.send_text
@@ -577,7 +583,48 @@ async def websocket_transcribe(websocket: WebSocket):
 
         while True:
             try:
-                data = await websocket.receive()
+                # When VAD detects active speech, use a short receive timeout.
+                # If the client stops sending audio (common when client-side VAD
+                # detects silence), we force speech_end rather than waiting for
+                # the client's flush watchdog (typically 3s).
+                _recv_timeout = _VAD_RECV_TIMEOUT if (streaming_vad and streaming_vad.speech_active) else None
+                try:
+                    if _recv_timeout is not None:
+                        data = await asyncio.wait_for(websocket.receive(), timeout=_recv_timeout)
+                    else:
+                        data = await websocket.receive()
+                except asyncio.TimeoutError:
+                    # No audio arrived while speech was active — client likely
+                    # stopped sending. Force speech_end to avoid waiting for
+                    # the client's silence watchdog (saves ~2-3s latency).
+                    if streaming_vad and streaming_vad.speech_active:
+                        ws_log.bind(
+                            frame=audio_frame_count,
+                            timeout_s=_VAD_RECV_TIMEOUT,
+                            window_bytes=len(audio_window) + len(audio_buffer),
+                        ).info("vad_speech_end_timeout")
+                        audio_window.extend(audio_buffer)
+                        audio_buffer.clear()
+
+                        if len(audio_window) > 0:
+                            t_infer = time.time()
+                            text, _ = await _transcribe_with_context(
+                                audio_window, b"", pad_silence=True,
+                                lang_code=lang_code, use_vad=False,
+                            )
+                            inference_ms = round((time.time() - t_infer) * 1000)
+                            chunk_count += 1
+                            if text and text.strip():
+                                ws_log.bind(text=text[:80], text_len=len(text.strip()), is_final=True, inference_ms=inference_ms).info("vad_transcript_final_timeout")
+                            await _ws_send_text(_json_encode({
+                                "text": text,
+                                "is_partial": False,
+                                "is_final": True,
+                            }))
+                        audio_window.clear()
+                        streaming_vad.reset()
+                    continue
+
                 msg_count += 1
 
                 if data.get("type") == "websocket.disconnect":

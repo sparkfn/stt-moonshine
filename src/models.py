@@ -346,8 +346,20 @@ class StreamingVAD:
             try:
                 with _torch.inference_mode():
                     prob = vad(frame_tensor, TARGET_SR).item()
-            except Exception:
+            except Exception as e:
+                if self._total_frames <= 3:
+                    log.bind(error=str(e), frame=self._total_frames).warning("streaming_vad_frame_error")
                 continue
+
+            # Periodic diagnostic logging (every ~1s = 31 frames at 32ms)
+            if self._total_frames % 31 == 0:
+                log.bind(
+                    frame=self._total_frames,
+                    prob=round(prob, 3),
+                    speech_active=self._speech_active,
+                    speech_frames=self._speech_frame_count,
+                    silence_frames=self._silence_frame_count,
+                ).debug("streaming_vad_diag")
 
             if not self._speech_active:
                 if prob >= pos_thresh:
