@@ -164,13 +164,23 @@ def unload_all_models():
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        except Exception:
-            pass
+        except Exception as e:
+            log.bind(error=str(e)).warning("cuda_cache_clear_failed")
         log.bind(elapsed_ms=round((time.time() - t0) * 1000)).info("models_unloaded")
 
 
 def is_loaded() -> bool:
     return _models_loaded
+
+
+def subsystem_status() -> dict:
+    """Return status of each model subsystem. Useful for health checks."""
+    return {
+        "vad": _vad_model is not None,
+        "lid": _lid_classifier is not None,
+        "stt_en": _moonshine_en is not None,
+        "stt_zh": _moonshine_zh is not None,
+    }
 
 
 def get_last_used() -> float:
@@ -187,8 +197,10 @@ def is_speech(audio_float32: np.ndarray, threshold: float = 0.5) -> bool:
 
     Silero expects exactly VAD_FRAME_SAMPLES (512) samples at 16kHz.
     We check multiple frames and return True if any frame exceeds threshold.
+    Returns True (assume speech) if VAD is unavailable or errors occur.
     """
     if _vad_model is None or _torch is None:
+        # VAD unavailable — assume speech to avoid dropping audio
         return True
     if len(audio_float32) < VAD_FRAME_SAMPLES:
         return True
@@ -302,8 +314,8 @@ class StreamingVAD:
         if self._vad is not None:
             try:
                 self._vad.reset_states()
-            except Exception:
-                pass
+            except Exception as e:
+                log.bind(error=str(e)).warning("streaming_vad_reset_failed")
 
     def process(self, audio_float32: np.ndarray) -> str | None:
         """Feed audio through VAD frame-by-frame.
@@ -344,7 +356,8 @@ class StreamingVAD:
                 with _torch.inference_mode():
                     prob = vad(frame_tensor, TARGET_SR).item()
             except Exception as e:
-                if self._total_frames <= 3:
+                # Log first 3 errors individually, then every 100th to avoid spam
+                if self._total_frames <= 3 or self._total_frames % 100 == 0:
                     log.bind(error=str(e), frame=self._total_frames).warning("streaming_vad_frame_error")
                 continue
 
@@ -393,9 +406,16 @@ class StreamingVAD:
         return self._vad is not None
 
 
+_lid_unavailable_warned = False
+
+
 def detect_language(audio_float32: np.ndarray) -> str:
     """Detect language using SpeechBrain VoxLingua107. Returns 'en' or 'zh'."""
+    global _lid_unavailable_warned
     if _lid_classifier is None:
+        if not _lid_unavailable_warned:
+            log.warning("lid_unavailable_defaulting_en")
+            _lid_unavailable_warned = True
         return "en"
     try:
         tensor = _torch.from_numpy(audio_float32).unsqueeze(0)
@@ -405,7 +425,7 @@ def detect_language(audio_float32: np.ndarray) -> str:
         log.bind(label=label, score=round(score.item(), 3)).debug("lid_result")
         return "zh" if lang_code == "zh" else "en"
     except Exception as e:
-        log.bind(error=str(e)).debug("lid_failed_default_en")
+        log.bind(error=str(e)).warning("lid_failed_defaulting_en")
         return "en"
 
 

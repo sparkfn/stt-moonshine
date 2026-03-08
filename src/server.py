@@ -292,6 +292,7 @@ async def health():
             "gpu_allocated_mb": round(torch.cuda.memory_allocated() / 1024**2),
             "gpu_reserved_mb": round(torch.cuda.memory_reserved() / 1024**2),
         }
+    subsystems = models.subsystem_status() if models.is_loaded() else {}
     return {
         "status": "ok",
         "mode": "server",
@@ -299,6 +300,7 @@ async def health():
         "model_id": f"{os.getenv('MOONSHINE_EN_MODEL', '')} + {os.getenv('MOONSHINE_ZH_MODEL', '')}" if models.is_loaded() else None,
         "cuda": cuda_available,
         **gpu_info,
+        **({"subsystems": subsystems} if subsystems else {}),
     }
 
 
@@ -477,15 +479,19 @@ async def _transcribe_with_context(
     pad_silence: bool = False,
     lang_code: str | None = None,
     use_vad: bool = True,
-) -> tuple[str, str]:
-    """Transcribe PCM audio with optional silence padding. Returns (text, language)."""
+) -> tuple[str, str, str | None]:
+    """Transcribe PCM audio with optional silence padding.
+
+    Returns (text, language, error_code).
+    error_code is None on success, or a string like "TRANSCRIPTION_TIMEOUT".
+    """
     n_audio = len(audio_bytes)
     n_total = n_audio
     if pad_silence:
         n_total += _SILENCE_PAD_BYTES_LEN
 
     if n_total == 0:
-        return "", ""
+        return "", "", None
 
     # Single allocation; trailing zeros serve as silence padding (bytearray inits to 0)
     buf = bytearray(n_total)
@@ -507,12 +513,13 @@ async def _transcribe_with_context(
             _infer_queue.submit(_vad_then_transcribe, priority=0),
             timeout=REQUEST_TIMEOUT,
         )
-        return detect_and_fix_repetitions(text), lang
+        return detect_and_fix_repetitions(text), lang, None
     except asyncio.TimeoutError:
-        return "[timeout]", ""
+        log.error("ws_transcribe_timeout")
+        return "", "", "TRANSCRIPTION_TIMEOUT"
     except Exception as e:
         log.bind(error=str(e)).error("ws_transcribe_context_error")
-        return "[transcription error]", ""
+        return "", "", "TRANSCRIPTION_ERROR"
 
 
 @app.websocket("/ws/transcribe")
@@ -612,19 +619,22 @@ async def websocket_transcribe(websocket: WebSocket):
 
                         if len(audio_window) > 0:
                             t_infer = time.time()
-                            text, _ = await _transcribe_with_context(
+                            text, _, err = await _transcribe_with_context(
                                 audio_window, pad_silence=True,
                                 lang_code=lang_code, use_vad=False,
                             )
                             inference_ms = round((time.time() - t_infer) * 1000)
                             chunk_count += 1
-                            if text and text.strip():
-                                ws_log.bind(text=text[:80], text_len=len(text.strip()), is_final=True, inference_ms=inference_ms).info("vad_transcript_final_timeout")
-                            await _ws_send_text(_json_encode({
-                                "text": text,
-                                "is_partial": False,
-                                "is_final": True,
-                            }))
+                            if err:
+                                await _ws_send_text(_json_encode({"code": err, "message": f"Transcription failed: {err}", "statusCode": 500}))
+                            else:
+                                if text and text.strip():
+                                    ws_log.bind(text=text[:80], text_len=len(text.strip()), is_final=True, inference_ms=inference_ms).info("vad_transcript_final_timeout")
+                                await _ws_send_text(_json_encode({
+                                    "text": text,
+                                    "is_partial": False,
+                                    "is_final": True,
+                                }))
                         audio_window.clear()
                         streaming_vad.reset()
                     continue
@@ -648,19 +658,22 @@ async def websocket_transcribe(websocket: WebSocket):
 
                             if len(audio_window) > 0:
                                 t_infer = time.time()
-                                text, _ = await _transcribe_with_context(
+                                text, _, err = await _transcribe_with_context(
                                     audio_window, pad_silence=True,
                                     lang_code=lang_code, use_vad=use_vad,
                                 )
                                 inference_ms = round((time.time() - t_infer) * 1000)
                                 chunk_count += 1
-                                if text.strip():
-                                    ws_log.bind(text=text[:80], text_len=len(text.strip()), is_final=True, inference_ms=inference_ms).debug("ws_transcript")
-                                await _ws_send_text(_json_encode({
-                                    "text": text,
-                                    "is_partial": False,
-                                    "is_final": True,
-                                }))
+                                if err:
+                                    await _ws_send_text(_json_encode({"code": err, "message": f"Transcription failed: {err}", "statusCode": 500, "is_final": True}))
+                                else:
+                                    if text.strip():
+                                        ws_log.bind(text=text[:80], text_len=len(text.strip()), is_final=True, inference_ms=inference_ms).debug("ws_transcript")
+                                    await _ws_send_text(_json_encode({
+                                        "text": text,
+                                        "is_partial": False,
+                                        "is_final": True,
+                                    }))
                             else:
                                 await _ws_send_text(_WS_EMPTY_FINAL)
                             audio_window.clear()
@@ -744,19 +757,22 @@ async def websocket_transcribe(websocket: WebSocket):
 
                         if len(audio_window) > 0:
                             t_infer = time.time()
-                            text, _ = await _transcribe_with_context(
+                            text, _, err = await _transcribe_with_context(
                                 audio_window, pad_silence=True,
                                 lang_code=lang_code, use_vad=False,
                             )
                             inference_ms = round((time.time() - t_infer) * 1000)
                             chunk_count += 1
-                            if text and text.strip():
-                                ws_log.bind(text=text[:80], text_len=len(text.strip()), is_final=True, inference_ms=inference_ms).info("vad_transcript_final")
-                            await _ws_send_text(_json_encode({
-                                "text": text,
-                                "is_partial": False,
-                                "is_final": True,
-                            }))
+                            if err:
+                                await _ws_send_text(_json_encode({"code": err, "message": f"Transcription failed: {err}", "statusCode": 500}))
+                            else:
+                                if text and text.strip():
+                                    ws_log.bind(text=text[:80], text_len=len(text.strip()), is_final=True, inference_ms=inference_ms).info("vad_transcript_final")
+                                await _ws_send_text(_json_encode({
+                                    "text": text,
+                                    "is_partial": False,
+                                    "is_final": True,
+                                }))
                         audio_window.clear()
                         streaming_vad.reset()
 
@@ -771,13 +787,17 @@ async def websocket_transcribe(websocket: WebSocket):
                             del audio_window[:trim]
 
                         t_infer = time.time()
-                        text, _ = await _transcribe_with_context(
+                        text, _, err = await _transcribe_with_context(
                             audio_window, pad_silence=False,
                             lang_code=lang_code, use_vad=use_vad,
                         )
                         inference_ms = round((time.time() - t_infer) * 1000)
                         chunk_count += 1
-                        if text:
+                        if err:
+                            ws_log.bind(error=err, inference_ms=inference_ms).warning("ws_partial_transcribe_error")
+                            # Don't send error for partials — they're best-effort.
+                            # But DO log so it's visible.
+                        elif text:
                             if text.strip():
                                 ws_log.bind(text=text[:80], text_len=len(text.strip()), is_final=False, inference_ms=inference_ms).debug("ws_transcript")
                             await _ws_send_text(_json_encode({
@@ -796,8 +816,8 @@ async def websocket_transcribe(websocket: WebSocket):
         ws_log.bind(error=str(e)).error("ws_error")
         try:
             await _ws_send_text(_json_encode({"code": "WEBSOCKET_ERROR", "message": "Internal server error", "statusCode": 500}))
-        except Exception:
-            pass
+        except Exception as send_err:
+            ws_log.bind(error=str(send_err)).warning("ws_error_send_failed")
     finally:
         duration_s = round(time.time() - t_connect, 1)
         ws_log.bind(
@@ -809,8 +829,8 @@ async def websocket_transcribe(websocket: WebSocket):
         reset_request_id(token)
         try:
             await websocket.close()
-        except Exception:
-            pass
+        except Exception as close_err:
+            ws_log.bind(error=str(close_err)).debug("ws_close_failed")
 
 
 if __name__ == "__main__":

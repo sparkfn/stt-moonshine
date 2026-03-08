@@ -21,6 +21,7 @@ class HealthResponse(BaseModel):
     gpu_allocated_mb: Optional[int] = Field(None, description="GPU memory currently allocated (MB)")
     gpu_reserved_mb: Optional[int] = Field(None, description="GPU memory currently reserved by PyTorch (MB)")
     worker_alive: Optional[bool] = Field(None, description="Not used (compatibility with qwen3-asr)")
+    subsystems: Optional[dict] = Field(None, description="Status of each subsystem: vad, lid, stt_en, stt_zh")
 
 
 class TranscriptionResponse(BaseModel):

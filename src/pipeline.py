@@ -25,7 +25,7 @@ def denoise(audio: np.ndarray, sr: int) -> np.ndarray:
     try:
         return _nr.reduce_noise(y=audio, sr=sr, stationary=True)
     except Exception as e:
-        log.bind(error=str(e)).debug("denoise_skipped")
+        log.bind(error=str(e)).warning("denoise_failed_using_original")
         return audio
 
 
