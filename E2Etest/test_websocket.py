@@ -171,7 +171,8 @@ class TestWebSocketCommands:
         async with ASRWebSocketClient(ws_url) as client:
             await client.websocket.send("not valid json")
             response = await asyncio.wait_for(client.receive(), timeout=5)
-            assert response.get("code") == "INVALID_JSON"
+            assert response.get("error", {}).get("code") == "invalid_json"
+            assert response["error"]["type"] == "invalid_request_error"
 
     @pytest.mark.asyncio
     async def test_unknown_action_handled(self, ws_url: str, ensure_server):
@@ -179,7 +180,8 @@ class TestWebSocketCommands:
         async with ASRWebSocketClient(ws_url) as client:
             await client.websocket.send(json.dumps({"action": "unknown_action"}))
             response = await asyncio.wait_for(client.receive(), timeout=5)
-            assert response.get("code") == "UNKNOWN_ACTION"
+            assert response.get("error", {}).get("code") == "unknown_action"
+            assert response["error"]["type"] == "invalid_request_error"
 
 
 # =============================================================================

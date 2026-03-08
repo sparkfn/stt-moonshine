@@ -2,13 +2,17 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 
-class ErrorResponse(BaseModel):
-    code: str = Field(..., description="Machine-readable error identifier (e.g. AUDIO_DECODE_FAILED)")
+class _ErrorDetail(BaseModel):
     message: str = Field(..., description="Human-readable error description")
-    context: Optional[dict] = Field(None, description="Debug data (requestId, input params)")
-    statusCode: int = Field(..., description="HTTP status code")
+    type: str = Field(..., description="Error category: invalid_request_error, server_error, not_found_error")
+    param: Optional[str] = Field(None, description="The parameter that caused the error")
+    code: Optional[str] = Field(None, description="Machine-readable error code (snake_case)")
 
-    model_config = {"json_schema_extra": {"examples": [{"code": "AUDIO_DECODE_FAILED", "message": "Could not decode audio: unknown format", "context": {"fileSize": 1024}, "statusCode": 422}]}}
+
+class ErrorResponse(BaseModel):
+    error: _ErrorDetail = Field(..., description="OpenAI-compatible error object")
+
+    model_config = {"json_schema_extra": {"examples": [{"error": {"message": "Could not decode the uploaded audio file", "type": "invalid_request_error", "param": "file", "code": "audio_decode_failed"}}]}}
 
 
 class HealthResponse(BaseModel):
