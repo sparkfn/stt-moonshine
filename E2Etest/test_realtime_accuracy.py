@@ -54,7 +54,7 @@ def _load_fleurs_sample(
     return wav, txt.read_text().strip() if txt.exists() else ""
 
 
-async def _stream_and_time(ws_url: str, audio: np.ndarray) -> dict:
+async def _stream_and_time(ws_url: str, audio: np.ndarray, language: str | None = None) -> dict:
     """Stream int16 PCM audio to the WebSocket and return timing + transcript data.
 
     Returns a dict with keys:
@@ -79,6 +79,8 @@ async def _stream_and_time(ws_url: str, audio: np.ndarray) -> dict:
     flush_latency_ms = 0.0
 
     async with ASRWebSocketClient(ws_url) as client:
+        if language:
+            await client.config(language)
         t_start = time.perf_counter()
 
         for i, chunk in enumerate(chunks):
@@ -120,12 +122,14 @@ async def _stream_and_time(ws_url: str, audio: np.ndarray) -> dict:
         await client.websocket.send(json.dumps({"action": "flush"}))
 
         final_text = ""
-        while True:
+        for _ in range(100):
             msg = await asyncio.wait_for(client.receive(), timeout=60)
             if msg.get("is_final"):
                 flush_latency_ms = (time.perf_counter() - t_flush) * 1000
                 final_text = msg.get("text", "")
                 break
+        else:
+            raise TimeoutError("flush drain did not receive final result")
 
     rtf = sum(infer_times) / audio_duration if infer_times else 0.0
 
@@ -208,7 +212,6 @@ def _save_json(result: dict, lang: str, wer: float, cer: float, stats: dict):
     reports_dir = Path(__file__).parent / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     output = {
-        "language": lang,
         "wer_pct": round(wer, 2),
         "cer_pct": round(cer, 2),
         "latency": {
@@ -225,7 +228,14 @@ def _save_json(result: dict, lang: str, wer: float, cer: float, stats: dict):
         "partials": result["partials"],
     }
     out_path = reports_dir / "realtime_latest.json"
-    out_path.write_text(json.dumps(output, indent=2, ensure_ascii=False))
+    existing = {}
+    if out_path.exists():
+        try:
+            existing = json.loads(out_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    existing[lang] = output
+    out_path.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
     print(f"\nResults saved -> {out_path}")
 
 
@@ -271,7 +281,7 @@ class TestRealtimeLatencyAndAccuracy:
                 audio,
             ).astype(np.int16)
 
-        result = await _stream_and_time(ws_url, audio)
+        result = await _stream_and_time(ws_url, audio, language="en")
 
         wer = calculate_wer(reference, result["final_text"]) * 100
         cer = calculate_cer(reference, result["final_text"]) * 100
@@ -281,9 +291,9 @@ class TestRealtimeLatencyAndAccuracy:
         _save_json(result, "english", wer, cer, stats)
 
         assert result["final_text"], "Expected non-empty transcription"
-        assert wer <= 120.0, f"WER {wer:.1f}% exceeds 120% streaming threshold"
-        assert stats["median"] < 30000, (
-            f"Median chunk latency {stats['median']:.0f}ms exceeds 30000ms"
+        assert wer <= 50.0, f"WER {wer:.1f}% exceeds 50% streaming threshold"
+        assert stats["median"] < 5000, (
+            f"Median chunk latency {stats['median']:.0f}ms exceeds 5s"
         )
 
     @pytest.mark.asyncio
@@ -317,7 +327,7 @@ class TestRealtimeLatencyAndAccuracy:
                 audio,
             ).astype(np.int16)
 
-        result = await _stream_and_time(ws_url, audio)
+        result = await _stream_and_time(ws_url, audio, language="zh")
 
         wer = calculate_wer(reference, result["final_text"]) * 100
         cer = calculate_cer(reference, result["final_text"]) * 100
@@ -327,7 +337,8 @@ class TestRealtimeLatencyAndAccuracy:
         _save_json(result, "chinese", wer, cer, stats)
 
         assert result["final_text"], "Expected non-empty transcription"
-        assert cer <= 200.0, f"CER {cer:.1f}% exceeds 200% streaming threshold for Chinese"
-        assert stats["median"] < 30000, (
-            f"Median chunk latency {stats['median']:.0f}ms exceeds 30000ms"
+        assert wer <= 60.0, f"WER {wer:.1f}% exceeds 60% streaming threshold for Chinese"
+        assert cer <= 80.0, f"CER {cer:.1f}% exceeds 80% streaming threshold for Chinese"
+        assert stats["median"] < 5000, (
+            f"Median chunk latency {stats['median']:.0f}ms exceeds 5s"
         )

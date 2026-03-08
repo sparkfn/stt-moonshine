@@ -18,6 +18,11 @@ import numpy as np
 from scipy.signal import butter, sosfilt
 
 try:
+    import librosa as _librosa
+except ImportError:
+    _librosa = None
+
+try:
     import orjson
     def _json_encode(obj) -> str:
         return orjson.dumps(obj).decode()
@@ -82,9 +87,10 @@ def _telephony_bandpass(audio: np.ndarray) -> np.ndarray:
 def _resample_pcm_bytes(pcm_bytes: bytes, orig_sr: int) -> bytes:
     if orig_sr == TARGET_SR:
         return pcm_bytes
+    if _librosa is None:
+        raise RuntimeError("librosa is required for resampling but is not installed")
     samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
-    import librosa
-    resampled = librosa.resample(samples, orig_sr=orig_sr, target_sr=TARGET_SR)
+    resampled = _librosa.resample(samples, orig_sr=orig_sr, target_sr=TARGET_SR)
     return resampled.astype(np.int16).tobytes()
 
 
@@ -129,9 +135,11 @@ class PriorityInferQueue:
                     self._has_work.clear()
             try:
                 result = await loop.run_in_executor(_infer_executor, job.fn)
-                job.future.set_result(result)
+                if not job.future.done():
+                    job.future.set_result(result)
             except Exception as e:
-                job.future.set_exception(e)
+                if not job.future.done():
+                    job.future.set_exception(e)
 
     async def submit(self, fn, priority: int = 1):
         loop = asyncio.get_event_loop()
@@ -144,9 +152,10 @@ class PriorityInferQueue:
 
 
 _infer_queue = PriorityInferQueue()
-_model_lock = None
+_model_lock = asyncio.Lock()
 
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
 IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "0"))
 
 WS_BUFFER_SIZE = int(os.getenv("WS_BUFFER_SIZE", str(int(TARGET_SR * 2 * 0.2))))
@@ -203,19 +212,20 @@ async def _ensure_model_loaded():
 
 async def _idle_watchdog():
     while True:
-        await asyncio.sleep(30)
-        if IDLE_TIMEOUT <= 0 or not models.is_loaded():
-            continue
-        if time.time() - models.get_last_used() > IDLE_TIMEOUT:
-            async with _model_lock:
-                if models.is_loaded() and time.time() - models.get_last_used() > IDLE_TIMEOUT:
-                    await asyncio.get_event_loop().run_in_executor(_infer_executor, models.unload_all_models)
+        try:
+            await asyncio.sleep(30)
+            if IDLE_TIMEOUT <= 0 or not models.is_loaded():
+                continue
+            if time.time() - models.get_last_used() > IDLE_TIMEOUT:
+                async with _model_lock:
+                    if models.is_loaded() and time.time() - models.get_last_used() > IDLE_TIMEOUT:
+                        await asyncio.get_event_loop().run_in_executor(_infer_executor, models.unload_all_models)
+        except Exception as e:
+            log.bind(error=str(e)).error("idle_watchdog_error")
 
 
 @asynccontextmanager
 async def lifespan(the_app):
-    global _model_lock
-    _model_lock = asyncio.Lock()
     from config import validate_env
     validate_env()
     _infer_queue.start()
@@ -229,8 +239,10 @@ async def lifespan(the_app):
         ws_skip_denoise=WS_SKIP_DENOISE,
     ).info("server_started")
     yield
+    t_shutdown = time.time()
     _infer_executor.shutdown(wait=False)
-    log.info("server_shutdown")
+    _infer_queue.stop()
+    log.bind(elapsed_ms=round((time.time() - t_shutdown) * 1000)).info("server_shutdown")
 
 
 from schemas import (
@@ -309,13 +321,14 @@ async def transcribe(
 ):
     await _ensure_model_loaded()
     audio_bytes = await file.read()
+    if len(audio_bytes) > MAX_UPLOAD_BYTES:
+        return error_response("FILE_TOO_LARGE", f"Upload exceeds {MAX_UPLOAD_BYTES // (1024*1024)}MB limit", 413)
     log.bind(endpoint="/v1/audio/transcriptions", filename=file.filename, size_bytes=len(audio_bytes), language=language).info("request_received")
     t0 = time.time()
     try:
         audio, sr = _decode_audio(audio_bytes)
     except Exception as e:
-        log.bind(endpoint="/v1/audio/transcriptions", error=str(e), size_bytes=len(audio_bytes)).error("audio_decode_failed")
-        return error_response("AUDIO_DECODE_FAILED", f"Could not decode audio: {e}", 422, fileSize=len(audio_bytes))
+        return error_response("AUDIO_DECODE_FAILED", "Could not decode the uploaded audio file", 422, endpoint="/v1/audio/transcriptions", fileSize=len(audio_bytes))
 
     lang_code = _normalize_lang_input(language)
 
@@ -372,7 +385,7 @@ async def sse_transcribe_generator(audio, sr, lang_code, requested_language: str
     audio_duration = len(audio) / sr
     t0 = time.time()
     chunk_count = 0
-    log.bind(audio_s=round(audio_duration, 2), lang=lang_code or "auto").info("sse_stream_started")
+    log.bind(endpoint="/v1/audio/transcriptions/stream", audio_s=round(audio_duration, 2), lang=lang_code or "auto").info("sse_stream_started")
     try:
         from config import SSE_CHUNK_SECONDS, SSE_OVERLAP_SECONDS
         CHUNK_SAMPLES = TARGET_SR * SSE_CHUNK_SECONDS
@@ -415,13 +428,13 @@ async def sse_transcribe_generator(audio, sr, lang_code, requested_language: str
                 start = end - OVERLAP_SAMPLES
 
         elapsed_ms = round((time.time() - t0) * 1000)
-        log.bind(chunks=chunk_count, elapsed_ms=elapsed_ms).info("sse_stream_completed")
+        log.bind(endpoint="/v1/audio/transcriptions/stream", chunks=chunk_count, elapsed_ms=elapsed_ms).info("sse_stream_completed")
         yield _SSE_DONE
 
     except Exception as e:
         elapsed_ms = round((time.time() - t0) * 1000)
-        log.bind(error=str(e), elapsed_ms=elapsed_ms, chunks=chunk_count).error("sse_stream_error")
-        yield f"data: {_json_encode({'code': 'SSE_STREAM_ERROR', 'message': str(e), 'statusCode': 500})}\n\n"
+        log.bind(endpoint="/v1/audio/transcriptions/stream", error=str(e), elapsed_ms=elapsed_ms, chunks=chunk_count).error("sse_stream_error")
+        yield f"data: {_json_encode({'code': 'SSE_STREAM_ERROR', 'message': 'Internal streaming error', 'statusCode': 500})}\n\n"
 
 
 @app.post(
@@ -438,12 +451,13 @@ async def transcribe_stream(
 ):
     await _ensure_model_loaded()
     audio_bytes = await file.read()
+    if len(audio_bytes) > MAX_UPLOAD_BYTES:
+        return error_response("FILE_TOO_LARGE", f"Upload exceeds {MAX_UPLOAD_BYTES // (1024*1024)}MB limit", 413)
     log.bind(endpoint="/v1/audio/transcriptions/stream", filename=file.filename, size_bytes=len(audio_bytes), language=language).info("request_received")
     try:
         audio, sr = _decode_audio(audio_bytes)
     except Exception as e:
-        log.bind(endpoint="/v1/audio/transcriptions/stream", error=str(e), size_bytes=len(audio_bytes)).error("audio_decode_failed")
-        return error_response("AUDIO_DECODE_FAILED", f"Could not decode audio: {e}", 422, fileSize=len(audio_bytes))
+        return error_response("AUDIO_DECODE_FAILED", "Could not decode the uploaded audio file", 422, endpoint="/v1/audio/transcriptions/stream", fileSize=len(audio_bytes))
 
     lang_code = _normalize_lang_input(language)
     return StreamingResponse(
@@ -502,7 +516,7 @@ async def _transcribe_with_context(
         return "[timeout]", ""
     except Exception as e:
         log.bind(error=str(e)).error("ws_transcribe_context_error")
-        return f"[error: {e}]", ""
+        return "[transcription error]", ""
 
 
 @app.websocket("/ws/transcribe")
@@ -522,7 +536,7 @@ async def websocket_transcribe(websocket: WebSocket):
 
     audio_buffer = bytearray()
     audio_window = bytearray()
-    lang_code: str | None = "en"
+    lang_code: str | None = None
     use_vad: bool = ASR_USE_SERVER_VAD
     vad_param = websocket.query_params.get("use_server_vad")
     if vad_param is not None:
@@ -655,9 +669,9 @@ async def websocket_transcribe(websocket: WebSocket):
                         _incoming_float *= _INV_32768
                         _vad_event = streaming_vad.process(_incoming_float)
                         if _vad_event == "speech_start":
-                            ws_log.info("vad_speech_start")
+                            ws_log.bind(frame=audio_frame_count, window_bytes=len(audio_window) + len(audio_buffer)).debug("vad_speech_start")
                         elif _vad_event == "speech_end":
-                            ws_log.info("vad_speech_end")
+                            ws_log.bind(frame=audio_frame_count, window_bytes=len(audio_window) + len(audio_buffer)).info("vad_speech_end")
 
                     audio_buffer.extend(incoming)
 
@@ -711,25 +725,15 @@ async def websocket_transcribe(websocket: WebSocket):
                             }))
 
             except WebSocketDisconnect:
-                if audio_buffer:
-                    audio_window.extend(audio_buffer)
-                if len(audio_window) > 0:
-                    try:
-                        text, _ = await _transcribe_with_context(
-                            audio_window, b"", pad_silence=True,
-                            lang_code=lang_code, use_vad=use_vad,
-                        )
-                        chunk_count += 1
-                        if text and text.strip():
-                            ws_log.bind(text=text[:80], text_len=len(text.strip())).info("ws_disconnect_final_transcript")
-                    except Exception:
-                        pass
+                discarded_bytes = len(audio_buffer) + len(audio_window)
+                if discarded_bytes > 0:
+                    ws_log.bind(discarded_bytes=discarded_bytes).info("ws_disconnect_audio_discarded")
                 break
 
     except Exception as e:
         ws_log.bind(error=str(e)).error("ws_error")
         try:
-            await _ws_send_text(_json_encode({"code": "WEBSOCKET_ERROR", "message": str(e), "statusCode": 500}))
+            await _ws_send_text(_json_encode({"code": "WEBSOCKET_ERROR", "message": "Internal server error", "statusCode": 500}))
         except Exception:
             pass
     finally:

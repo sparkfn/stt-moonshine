@@ -42,6 +42,12 @@ _LEVEL_MAP = {
 _NL = b"\n"
 _stdout_buf = sys.stdout.buffer
 
+# Keys reserved for the log envelope — extra fields with these names are
+# namespaced under "data" to prevent accidental overwrites.
+_ENVELOPE_KEYS = frozenset({
+    "timestamp", "level", "message", "service", "requestId", "err", "caller",
+})
+
 
 def _json_sink(message: "loguru.Message") -> None:
     record = message.record
@@ -51,13 +57,21 @@ def _json_sink(message: "loguru.Message") -> None:
         "level": _LEVEL_MAP.get(raw_level, raw_level),
         "message": record["message"],
         "service": "moonshine-asr",
+        "caller": f"{record['file'].name}:{record['line']}",
     }
     req_id = _request_id_var.get()
     if req_id:
         entry["requestId"] = req_id
     extra = record.get("extra", {})
     if extra:
-        entry.update(extra)
+        # Protect envelope keys from collision
+        collisions = extra.keys() & _ENVELOPE_KEYS
+        if collisions:
+            safe = {k: v for k, v in extra.items() if k not in _ENVELOPE_KEYS}
+            safe["data"] = {k: extra[k] for k in collisions}
+            entry.update(safe)
+        else:
+            entry.update(extra)
     exc = record["exception"]
     if exc:
         entry["err"] = str(exc.value)

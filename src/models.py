@@ -3,8 +3,11 @@ from __future__ import annotations
 import os
 import gc
 import time
+import threading
 import numpy as np
 from logger import log
+
+_model_rw_lock = threading.Lock()
 
 _moonshine_en = None
 _moonshine_zh = None
@@ -52,93 +55,94 @@ def load_all_models():
     global _vad_model, _lid_classifier
     global _models_loaded, _last_used, _numpy_input, _torch
 
-    if _models_loaded:
-        return
+    with _model_rw_lock:
+        if _models_loaded:
+            return
 
-    import torch
-    _torch = torch
+        import torch
+        _torch = torch
 
-    t_total = time.time()
+        t_total = time.time()
 
-    # -- STT_DEVICE note ------------------------------------------------
-    stt_device_val = os.getenv("STT_DEVICE", "")
-    if stt_device_val:
-        log.bind(stt_device=stt_device_val).info(
-            "stt_device_ignored_onnx_rt_selects_provider"
-        )
+        # -- STT_DEVICE note ------------------------------------------------
+        stt_device_val = os.getenv("STT_DEVICE", "")
+        if stt_device_val:
+            log.bind(stt_device=stt_device_val).info(
+                "stt_device_ignored_onnx_rt_selects_provider"
+            )
 
-    # -- Silero VAD -----------------------------------------------------
-    t0 = time.time()
-    try:
-        from silero_vad import load_silero_vad
-        _vad_model = load_silero_vad()
-        _vad_model.eval()
-        log.bind(elapsed_ms=round((time.time() - t0) * 1000)).info("model_loaded_vad")
-    except Exception as e:
-        log.bind(error=str(e)).error("model_load_failed_vad")
+        # -- Silero VAD -----------------------------------------------------
+        t0 = time.time()
+        try:
+            from silero_vad import load_silero_vad
+            _vad_model = load_silero_vad()
+            _vad_model.eval()
+            log.bind(elapsed_ms=round((time.time() - t0) * 1000)).info("model_loaded_vad")
+        except Exception as e:
+            log.bind(error=str(e)).error("model_load_failed_vad")
 
-    # -- SpeechBrain LID (VoxLingua107 ECAPA-TDNN) ----------------------
-    lid_device = os.getenv("LID_DEVICE", "cpu").lower()
-    if lid_device == "auto":
-        lid_device = "cuda" if torch.cuda.is_available() else "cpu"
-    t0 = time.time()
-    try:
-        from speechbrain.inference.classifiers import EncoderClassifier
-        _lid_classifier = EncoderClassifier.from_hparams(
-            source="speechbrain/lang-id-voxlingua107-ecapa",
-            savedir=os.getenv("SPEECHBRAIN_CACHE", "/data/cache/speechbrain"),
-            run_opts={"device": lid_device},
-        )
-        log.bind(device=lid_device, languages=107, elapsed_ms=round((time.time() - t0) * 1000)).info("model_loaded_lid")
-    except Exception as e:
-        log.bind(device=lid_device, error=str(e)).error("model_load_failed_lid")
-        _lid_classifier = None
+        # -- SpeechBrain LID (VoxLingua107 ECAPA-TDNN) ----------------------
+        lid_device = os.getenv("LID_DEVICE", "cpu").lower()
+        if lid_device == "auto":
+            lid_device = "cuda" if torch.cuda.is_available() else "cpu"
+        t0 = time.time()
+        try:
+            from speechbrain.inference.classifiers import EncoderClassifier
+            _lid_classifier = EncoderClassifier.from_hparams(
+                source="speechbrain/lang-id-voxlingua107-ecapa",
+                savedir=os.getenv("SPEECHBRAIN_CACHE", "/data/cache/speechbrain"),
+                run_opts={"device": lid_device},
+            )
+            log.bind(device=lid_device, languages=107, elapsed_ms=round((time.time() - t0) * 1000)).info("model_loaded_lid")
+        except Exception as e:
+            log.bind(device=lid_device, error=str(e)).error("model_load_failed_lid")
+            _lid_classifier = None
 
-    # -- Moonshine EN ---------------------------------------------------
-    t0 = time.time()
-    try:
-        from moonshine_voice import Transcriber
-        en_path, en_arch = _resolve_model("MOONSHINE_EN_MODEL", "en")
-        _moonshine_en = Transcriber(en_path, en_arch)
-        log.bind(path=en_path, elapsed_ms=round((time.time() - t0) * 1000)).info("model_loaded_en")
-    except Exception as e:
-        log.bind(error=str(e)).error("model_load_failed_en")
-        raise
+        # -- Moonshine EN ---------------------------------------------------
+        t0 = time.time()
+        try:
+            from moonshine_voice import Transcriber
+            en_path, en_arch = _resolve_model("MOONSHINE_EN_MODEL", "en")
+            _moonshine_en = Transcriber(en_path, en_arch)
+            log.bind(path=en_path, elapsed_ms=round((time.time() - t0) * 1000)).info("model_loaded_en")
+        except Exception as e:
+            log.bind(error=str(e)).error("model_load_failed_en")
+            raise
 
-    # -- Moonshine ZH ---------------------------------------------------
-    t0 = time.time()
-    try:
-        from moonshine_voice import Transcriber
-        zh_path, zh_arch = _resolve_model("MOONSHINE_ZH_MODEL", "zh")
-        _moonshine_zh = Transcriber(zh_path, zh_arch)
-        log.bind(path=zh_path, elapsed_ms=round((time.time() - t0) * 1000)).info("model_loaded_zh")
-    except Exception as e:
-        log.bind(error=str(e)).error("model_load_failed_zh")
-        raise
+        # -- Moonshine ZH ---------------------------------------------------
+        t0 = time.time()
+        try:
+            from moonshine_voice import Transcriber
+            zh_path, zh_arch = _resolve_model("MOONSHINE_ZH_MODEL", "zh")
+            _moonshine_zh = Transcriber(zh_path, zh_arch)
+            log.bind(path=zh_path, elapsed_ms=round((time.time() - t0) * 1000)).info("model_loaded_zh")
+        except Exception as e:
+            log.bind(error=str(e)).error("model_load_failed_zh")
+            raise
 
-    # -- Warmup + detect numpy input support ----------------------------
-    t0 = time.time()
-    rng = np.random.default_rng(seed=42)
-    dummy = rng.standard_normal(TARGET_SR).astype(np.float32) * 0.01
-    try:
-        # Try numpy array directly (avoids expensive .tolist() copy)
-        _moonshine_en.transcribe_without_streaming(dummy, TARGET_SR)
-        _moonshine_zh.transcribe_without_streaming(dummy, TARGET_SR)
-        _numpy_input = True
-    except (TypeError, ValueError, AttributeError):
-        # Fall back to Python list
-        _moonshine_en.transcribe_without_streaming(dummy.tolist(), TARGET_SR)
-        _moonshine_zh.transcribe_without_streaming(dummy.tolist(), TARGET_SR)
-        _numpy_input = False
-    log.bind(elapsed_ms=round((time.time() - t0) * 1000), numpy_input=_numpy_input).info("model_warmup_complete")
+        # -- Warmup + detect numpy input support ----------------------------
+        t0 = time.time()
+        rng = np.random.default_rng(seed=42)
+        dummy = rng.standard_normal(TARGET_SR).astype(np.float32) * 0.01
+        try:
+            # Try numpy array directly (avoids expensive .tolist() copy)
+            _moonshine_en.transcribe_without_streaming(dummy, TARGET_SR)
+            _moonshine_zh.transcribe_without_streaming(dummy, TARGET_SR)
+            _numpy_input = True
+        except (TypeError, ValueError, AttributeError):
+            # Fall back to Python list
+            _moonshine_en.transcribe_without_streaming(dummy.tolist(), TARGET_SR)
+            _moonshine_zh.transcribe_without_streaming(dummy.tolist(), TARGET_SR)
+            _numpy_input = False
+        log.bind(elapsed_ms=round((time.time() - t0) * 1000), numpy_input=_numpy_input).info("model_warmup_complete")
 
-    _models_loaded = True
-    _last_used = time.time()
-    total_ms = round((time.time() - t_total) * 1000)
-    gpu_mb = 0
-    if torch.cuda.is_available():
-        gpu_mb = round(torch.cuda.memory_allocated(0) / 1024 / 1024)
-    log.bind(total_elapsed_ms=total_ms, gpu_allocated_mb=gpu_mb).info("all_models_ready")
+        _models_loaded = True
+        _last_used = time.time()
+        total_ms = round((time.time() - t_total) * 1000)
+        gpu_mb = 0
+        if torch.cuda.is_available():
+            gpu_mb = round(torch.cuda.memory_allocated(0) / 1024 / 1024)
+        log.bind(total_elapsed_ms=total_ms, gpu_allocated_mb=gpu_mb).info("all_models_ready")
 
 
 def unload_all_models():
@@ -146,14 +150,22 @@ def unload_all_models():
     global _moonshine_en, _moonshine_zh, _vad_model, _lid_classifier
     global _models_loaded
 
-    log.info("models_unloading")
-    _moonshine_en = None
-    _moonshine_zh = None
-    _vad_model = None
-    _lid_classifier = None
-    _models_loaded = False
-    gc.collect()
-    log.info("models_unloaded")
+    with _model_rw_lock:
+        t0 = time.time()
+        log.info("models_unloading")
+        _moonshine_en = None
+        _moonshine_zh = None
+        _vad_model = None
+        _lid_classifier = None
+        _models_loaded = False
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        log.bind(elapsed_ms=round((time.time() - t0) * 1000)).info("models_unloaded")
 
 
 def is_loaded() -> bool:
@@ -182,7 +194,8 @@ def is_speech(audio_float32: np.ndarray, threshold: float = 0.5) -> bool:
         with _torch.inference_mode():
             confidence = _vad_model(tensor, TARGET_SR).item()
         return confidence >= threshold
-    except Exception:
+    except Exception as e:
+        log.bind(error=str(e), samples=len(audio_float32)).warning("vad_is_speech_error")
         return True
 
 
@@ -194,7 +207,8 @@ def vad_confidence(audio_float32: np.ndarray) -> float:
         tensor = _torch.from_numpy(audio_float32).unsqueeze(0)
         with _torch.inference_mode():
             return _vad_model(tensor, TARGET_SR).item()
-    except Exception:
+    except Exception as e:
+        log.bind(error=str(e), samples=len(audio_float32)).warning("vad_confidence_error")
         return 1.0
 
 
@@ -203,8 +217,8 @@ def reset_vad_state() -> None:
     if _vad_model is not None:
         try:
             _vad_model.reset_states()
-        except Exception:
-            pass
+        except Exception as e:
+            log.bind(error=str(e)).warning("vad_reset_error")
 
 
 # Silero VAD expects 512 samples at 16kHz (32ms per frame)
@@ -252,6 +266,10 @@ class StreamingVAD:
 
     def process(self, audio_float32: np.ndarray) -> str | None:
         """Feed audio through VAD frame-by-frame.
+
+        Note: Only the *last* state transition is returned. Callers should feed
+        small chunks (~3200 samples / 200ms) to ensure at most one transition
+        per call. The WebSocket path already satisfies this constraint.
 
         Returns:
             "speech_start" — speech detected (above positive threshold)

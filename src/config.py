@@ -4,15 +4,6 @@ import sys
 from logger import log
 
 
-def _safe_float(name: str, default: str) -> float:
-    raw = os.getenv(name, default)
-    try:
-        return float(raw)
-    except ValueError:
-        log.bind(key=name, value=raw, default=default).error("config_invalid_float")
-        return float(default)
-
-
 def _safe_int(name: str, default: str) -> int:
     raw = os.getenv(name, default)
     try:
@@ -32,13 +23,10 @@ _LOG_LEVEL_ALIASES = {"WARN": "WARNING", "FATAL": "CRITICAL"}
 def validate_env() -> None:
     errors = []
 
+    # MOONSHINE_EN_MODEL / MOONSHINE_ZH_MODEL are optional; when empty,
+    # models.py._resolve_model() falls back to the default for each language.
     en_model = os.getenv("MOONSHINE_EN_MODEL", "")
-    if not en_model:
-        errors.append("MOONSHINE_EN_MODEL is required but empty or unset")
-
     zh_model = os.getenv("MOONSHINE_ZH_MODEL", "")
-    if not zh_model:
-        errors.append("MOONSHINE_ZH_MODEL is required but empty or unset")
 
     try:
         rt = int(os.getenv("REQUEST_TIMEOUT", "300"))
@@ -72,7 +60,17 @@ def validate_env() -> None:
 
     if errors:
         for err in errors:
-            log.bind(detail=err).error("config_validation_failed")
+            log.bind(error=err).error("config_validation_failed")
         sys.exit(1)
 
-    log.info("config_validated")
+    log.bind(
+        en_model=en_model,
+        zh_model=zh_model,
+        log_level=log_level,
+        stt_device=stt_device,
+        ws_window_max_s=float(os.getenv("WS_WINDOW_MAX_S", "6.0")),
+        request_timeout=int(os.getenv("REQUEST_TIMEOUT", "300")),
+        idle_timeout=int(os.getenv("IDLE_TIMEOUT", "0")),
+        sse_chunk_s=SSE_CHUNK_SECONDS,
+        sse_overlap_s=SSE_OVERLAP_SECONDS,
+    ).info("config_validated")

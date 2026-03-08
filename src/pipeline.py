@@ -50,7 +50,9 @@ def process_audio(
     t0 = time.time()
 
     # Step 1: Denoise (skip for pre-filtered audio)
-    if not skip_denoise:
+    if skip_denoise:
+        log.debug("denoise_skipped_bandpass")
+    else:
         audio = denoise(audio, sr)
 
     # Step 2: Determine language
@@ -76,64 +78,3 @@ def process_audio(
     ).debug("pipeline_transcribed")
 
     return text, detected_lang
-
-
-def process_audio_vad(audio: np.ndarray, sr: int, lang_code: str | None = None) -> tuple[str, str]:
-    """
-    Full pipeline with VAD segmentation: denoise -> VAD -> chunk -> LID -> route -> STT.
-    Used for file uploads where we want to process speech segments only.
-    """
-    import torch
-    from silero_vad import get_speech_timestamps
-
-    t0 = time.time()
-
-    # Step 1: Denoise
-    audio = denoise(audio, sr)
-
-    # Step 2: VAD segmentation
-    tensor = torch.from_numpy(audio)
-    vad_model = models.get_vad_model()
-    if vad_model is None:
-        return process_audio(audio, sr, lang_code, skip_denoise=True)
-
-    try:
-        timestamps = get_speech_timestamps(tensor, vad_model, sampling_rate=sr)
-    except Exception:
-        return process_audio(audio, sr, lang_code, skip_denoise=True)
-
-    if not timestamps:
-        return "", lang_code or "en"
-
-    # Step 3: Process each segment
-    texts = []
-    detected_lang = lang_code
-    for ts in timestamps:
-        start = ts['start']
-        end = ts['end']
-        chunk = audio[start:end]
-
-        if len(chunk) < sr * 0.1:  # skip chunks < 100ms
-            continue
-
-        if detected_lang is None or detected_lang == "auto":
-            detected_lang = models.detect_language(chunk)
-
-        if detected_lang == "zh":
-            text = models.transcribe_zh(chunk, sr)
-        else:
-            text = models.transcribe_en(chunk, sr)
-
-        if text:
-            texts.append(text)
-
-    result = " ".join(texts)
-    elapsed_ms = round((time.time() - t0) * 1000)
-    log.bind(
-        segments=len(timestamps),
-        lang=detected_lang or "en",
-        text_len=len(result),
-        elapsed_ms=elapsed_ms,
-    ).debug("pipeline_vad_transcribed")
-
-    return result, detected_lang or "en"

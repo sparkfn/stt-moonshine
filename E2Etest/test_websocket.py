@@ -1,4 +1,4 @@
-"""WebSocket tests for Qwen3-ASR real-time transcription.
+"""WebSocket tests for Moonshine ASR real-time transcription.
 
 Tests the WS /ws/transcribe endpoint:
 - Connection and handshake
@@ -73,20 +73,13 @@ class TestWebSocketAudioStreaming:
     async def test_send_audio_chunk(self, ws_url: str, ensure_server):
         """Can send audio chunk and receive result."""
         async with ASRWebSocketClient(ws_url) as client:
-            # Generate 1 second of audio
             audio = generate_test_tone(1.0, sample_rate=16000, amplitude=0.5)
             audio_int16 = convert_to_int16(audio)
-
             await client.send_audio(audio_int16.tobytes())
-
-            # Should eventually get a response
-            try:
-                response = await asyncio.wait_for(client.receive(), timeout=5)
-                # Could be partial result or empty
-                assert isinstance(response, dict)
-            except asyncio.TimeoutError:
-                # No speech detected is also valid
-                pass
+            # Flush to guarantee a response
+            response = await client.flush()
+            assert isinstance(response, dict)
+            assert "text" in response
 
     @pytest.mark.asyncio
     async def test_flush_empty_buffer(self, ws_url: str, ensure_server):
@@ -121,7 +114,7 @@ class TestWebSocketAudioStreaming:
 
     @pytest.mark.asyncio
     async def test_disconnect_transcribes_remaining(self, ws_url: str, ensure_server):
-        """Disconnecting transcribes any remaining buffered audio."""
+        """Disconnecting after sending audio does not raise."""
         client = ASRWebSocketClient(ws_url)
         await client.connect()
 
@@ -175,32 +168,17 @@ class TestWebSocketCommands:
     async def test_invalid_json_handled(self, ws_url: str, ensure_server):
         """Invalid JSON is handled gracefully."""
         async with ASRWebSocketClient(ws_url) as client:
-            # Send invalid JSON directly
             await client.websocket.send("not valid json")
-
-            try:
-                response = await asyncio.wait_for(client.receive(), timeout=5)
-                # Should get structured error response
-                assert "code" in response or "error" in response
-            except asyncio.TimeoutError:
-                # Timeout is also acceptable handling
-                pass
+            response = await asyncio.wait_for(client.receive(), timeout=5)
+            assert "code" in response or "error" in response
 
     @pytest.mark.asyncio
     async def test_unknown_action_handled(self, ws_url: str, ensure_server):
-        """Unknown action is handled gracefully."""
+        """Unknown action returns error response."""
         async with ASRWebSocketClient(ws_url) as client:
-            # Send unknown action
             await client.websocket.send(json.dumps({"action": "unknown_action"}))
-
-            # Server may ignore or return error, either is fine
-            try:
-                response = await asyncio.wait_for(client.receive(), timeout=2)
-                # If we get a response, it should either be error or we ignore it
-                pass
-            except asyncio.TimeoutError:
-                # Timeout means server ignored it
-                pass
+            response = await asyncio.wait_for(client.receive(), timeout=5)
+            assert response.get("code") == "UNKNOWN_ACTION"
 
 
 # =============================================================================
@@ -246,7 +224,7 @@ class TestWebSocketStreaming:
 
     @pytest.mark.asyncio
     async def test_partial_results_during_stream(self, ws_url: str, ensure_server):
-        """Partial results arrive during streaming."""
+        """Streaming audio produces a final result after flush."""
         async with ASRWebSocketClient(ws_url) as client:
             info = client.connection_info
             buffer_size = info["buffer_size"]

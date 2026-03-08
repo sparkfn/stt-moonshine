@@ -1,0 +1,8 @@
+E2Etest/
+.git/
+.env
+*.md
+__pycache__/
+*.pyc
+data/
+.claude/

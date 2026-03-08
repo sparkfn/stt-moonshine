@@ -1,4 +1,4 @@
-"""HTTP and WebSocket client wrappers for E2E tests."""
+"""HTTP and WebSocket client wrappers for Moonshine ASR E2E tests."""
 from __future__ import annotations
 
 import asyncio
@@ -13,7 +13,7 @@ import soundfile as sf
 
 
 class ASRHTTPClient:
-    """Synchronous HTTP client for Qwen3-ASR API."""
+    """Synchronous HTTP client for Moonshine ASR API."""
 
     def __init__(self, base_url: str = "http://localhost:8200", timeout: float = 300):
         self.base_url = base_url.rstrip("/")
@@ -135,7 +135,7 @@ class ASRHTTPClient:
 
 
 class ASRAsyncHTTPClient:
-    """Asynchronous HTTP client for Qwen3-ASR API."""
+    """Asynchronous HTTP client for Moonshine ASR API."""
 
     def __init__(self, base_url: str = "http://localhost:8200", timeout: float = 300):
         self.base_url = base_url.rstrip("/")
@@ -216,13 +216,12 @@ class ASRWebSocketClient:
         if not self.websocket:
             raise RuntimeError("WebSocket not connected")
         await self.websocket.send(json.dumps({"action": "flush"}))
-        # Drain messages until we get the final result
-        while True:
+        for _ in range(100):  # guard against infinite loop
             raw_msg = await asyncio.wait_for(self.websocket.recv(), timeout=60)
             msg = json.loads(raw_msg)
             if msg.get("is_final") or msg.get("status") == "buffer_reset":
                 return msg
-            # If it's a partial, keep reading
+        raise TimeoutError("flush() did not receive final result after 100 messages")
 
     async def reset(self) -> dict:
         """Send reset command to clear buffers."""
@@ -290,7 +289,7 @@ class ASRWebSocketClient:
             except asyncio.TimeoutError:
                 pass
 
-            idx += samples_per_chunk
+            idx += samples_per_chunk - samples_overlap
 
         # Flush to get final result
         final = await self.flush()
@@ -324,8 +323,3 @@ class ASRWebSocketClient:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
-
-
-def run_sync(coro):
-    """Run an async coroutine synchronously."""
-    return asyncio.get_event_loop().run_until_complete(coro)

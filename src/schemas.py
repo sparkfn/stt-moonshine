@@ -56,11 +56,11 @@ class WebSocketHandshake(BaseModel):
     model_config = {"json_schema_extra": {"examples": [{"status": "connected", "buffer_size": 14400, "window_max_s": 6.0, "use_server_vad": True, "sample_rate": 16000}]}}
 
 
-class WebSocketPartial(BaseModel):
-    partial: str = Field(..., description="Cumulative transcript of the current sliding window")
-    language: str = Field(..., description="Detected language code")
-
-    model_config = {"json_schema_extra": {"examples": [{"partial": "Hello how are you", "language": "en"}]}}
+class WebSocketTranscript(BaseModel):
+    """WebSocket transcription result (partial or final)."""
+    text: str = Field(..., description="Transcribed text")
+    is_partial: bool = Field(..., description="True if this is an interim result")
+    is_final: bool = Field(..., description="True if this is the final result for this segment")
 
 
 API_TAGS = [

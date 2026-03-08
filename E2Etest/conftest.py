@@ -788,6 +788,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "requires_aligner: marks tests that require Qwen3-ForcedAligner-0.6B")
     config.addinivalue_line("markers", "subtitle: marks tests as subtitle tests")
     config.addinivalue_line("markers", "accuracy: marks tests as accuracy/WER/CER tests")
+    config.addinivalue_line("markers", "realtime: marks real-time streaming benchmark tests")
 
 
 def pytest_collection_modifyitems(config, items):
