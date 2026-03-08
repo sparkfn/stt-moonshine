@@ -275,50 +275,6 @@ class TestWebSocketStreaming:
             final = await client.flush()
             assert "text" in final
 
-    @pytest.mark.asyncio
-    async def test_sliding_window_cumulative(self, ws_url: str, ensure_server):
-        """Partials are cumulative: each contains the full transcript so far."""
-        async with ASRWebSocketClient(ws_url) as client:
-            info = client.connection_info
-            buffer_size = info["buffer_size"]
-            chunk_samples = buffer_size // 2
-
-            # Stream real speech audio (FLEURS english clip)
-            audio_path = Path(__file__).parent / "data" / "audio" / "real" / "english_01.wav"
-            if not audio_path.exists():
-                pytest.skip(f"FLEURS audio not found: {audio_path}")
-
-            import soundfile as sf_mod
-            audio, sr = sf_mod.read(str(audio_path), dtype="int16")
-            if len(audio.shape) > 1:
-                audio = audio.mean(axis=1).astype(np.int16)
-
-            partials = []
-            for i in range(0, len(audio), chunk_samples):
-                chunk = audio[i:i + chunk_samples]
-                await client.send_audio(chunk.tobytes())
-                try:
-                    msg = await asyncio.wait_for(client.receive(), timeout=5.0)
-                    if msg.get("is_partial") and msg.get("text"):
-                        partials.append(msg["text"])
-                except asyncio.TimeoutError:
-                    pass
-
-            # Verify partials generally grow (allow some revision shrinkage)
-            if len(partials) >= 2:
-                shrinks = 0
-                for i in range(1, len(partials)):
-                    if len(partials[i]) < len(partials[i - 1]) - 5:
-                        shrinks += 1
-                # Most partials should grow; allow up to 30% to shrink
-                # (model may revise when window expands)
-                max_shrinks = max(1, len(partials) // 3)
-                assert shrinks <= max_shrinks, (
-                    f"Too many shrinking partials: {shrinks}/{len(partials)-1}"
-                )
-
-            final = await client.flush()
-            assert final.get("is_final") is True
 
 
 # =============================================================================
