@@ -500,7 +500,7 @@ async def _transcribe_with_context(
     audio *= _INV_32768
     audio = _telephony_bandpass(audio)
 
-    if use_vad and not models.is_speech(audio[-min(len(audio), 8000):]):
+    if use_vad and not models.is_speech(audio):
         return "", ""
 
     try:

@@ -186,27 +186,48 @@ def get_vad_model():
 
 
 def is_speech(audio_float32: np.ndarray, threshold: float = 0.5) -> bool:
-    """Check if audio contains speech using Silero VAD."""
-    if _vad_model is None:
+    """Check if audio contains speech using Silero VAD.
+
+    Silero expects exactly VAD_FRAME_SAMPLES (512) samples at 16kHz.
+    We check multiple frames and return True if any frame exceeds threshold.
+    """
+    if _vad_model is None or _torch is None:
+        return True
+    if len(audio_float32) < VAD_FRAME_SAMPLES:
         return True
     try:
-        tensor = _torch.from_numpy(audio_float32).unsqueeze(0)
-        with _torch.inference_mode():
-            confidence = _vad_model(tensor, TARGET_SR).item()
-        return confidence >= threshold
+        # Check up to 4 evenly-spaced frames across the audio
+        n = len(audio_float32)
+        num_frames = min(4, n // VAD_FRAME_SAMPLES)
+        step = max(1, (n - VAD_FRAME_SAMPLES) // max(1, num_frames - 1))
+        frame_buf = _torch.zeros(1, VAD_FRAME_SAMPLES)
+        for i in range(num_frames):
+            offset = min(i * step, n - VAD_FRAME_SAMPLES)
+            frame_buf[0].copy_(_torch.from_numpy(
+                audio_float32[offset:offset + VAD_FRAME_SAMPLES]
+            ))
+            with _torch.inference_mode():
+                if _vad_model(frame_buf, TARGET_SR).item() >= threshold:
+                    return True
+        return False
     except Exception as e:
         log.bind(error=str(e), samples=len(audio_float32)).warning("vad_is_speech_error")
         return True
 
 
 def vad_confidence(audio_float32: np.ndarray) -> float:
-    """Return Silero VAD speech confidence (0.0-1.0). Returns 1.0 if VAD unavailable."""
-    if _vad_model is None:
+    """Return max Silero VAD confidence across sampled frames. Returns 1.0 if VAD unavailable."""
+    if _vad_model is None or _torch is None:
+        return 1.0
+    if len(audio_float32) < VAD_FRAME_SAMPLES:
         return 1.0
     try:
-        tensor = _torch.from_numpy(audio_float32).unsqueeze(0)
+        # Check last frame for a quick confidence estimate
+        frame = audio_float32[-VAD_FRAME_SAMPLES:]
+        frame_buf = _torch.zeros(1, VAD_FRAME_SAMPLES)
+        frame_buf[0].copy_(_torch.from_numpy(frame))
         with _torch.inference_mode():
-            return _vad_model(tensor, TARGET_SR).item()
+            return _vad_model(frame_buf, TARGET_SR).item()
     except Exception as e:
         log.bind(error=str(e), samples=len(audio_float32)).warning("vad_confidence_error")
         return 1.0
