@@ -91,7 +91,7 @@ def _resample_pcm_bytes(pcm_bytes: bytes, orig_sr: int) -> bytes:
         raise RuntimeError("librosa is required for resampling but is not installed")
     samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
     resampled = _librosa.resample(samples, orig_sr=orig_sr, target_sr=TARGET_SR)
-    return resampled.astype(np.int16).tobytes()
+    return np.clip(resampled, -32768, 32767).astype(np.int16).tobytes()
 
 
 _infer_executor = concurrent.futures.ThreadPoolExecutor(

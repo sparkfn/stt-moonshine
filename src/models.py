@@ -254,6 +254,14 @@ class StreamingVAD:
         self._total_frames = 0
         # Pre-allocated tensor buffer for single-frame inference (avoids per-frame allocation)
         self._frame_tensor = None  # lazily created when _torch is available
+        # Per-instance VAD model to avoid shared hidden state across sessions
+        self._vad = None
+        try:
+            from silero_vad import load_silero_vad
+            self._vad = load_silero_vad()
+            self._vad.eval()
+        except Exception:
+            pass  # falls back to global _vad_model
 
     def reset(self) -> None:
         """Reset VAD state for a new utterance."""
@@ -262,7 +270,13 @@ class StreamingVAD:
         self._silence_frame_count = 0
         self._leftover = _EMPTY_F32
         self._total_frames = 0
-        reset_vad_state()
+        if self._vad is not None:
+            try:
+                self._vad.reset_states()
+            except Exception:
+                pass
+        else:
+            reset_vad_state()
 
     def process(self, audio_float32: np.ndarray) -> str | None:
         """Feed audio through VAD frame-by-frame.
@@ -276,7 +290,8 @@ class StreamingVAD:
             "speech_end"   — silence after speech exceeded redemption period
             None           — no state transition
         """
-        if _vad_model is None or _torch is None:
+        vad = self._vad or _vad_model
+        if vad is None or _torch is None:
             return None
 
         # Lazily create reusable tensor buffer
@@ -303,7 +318,7 @@ class StreamingVAD:
 
             try:
                 with _torch.inference_mode():
-                    prob = _vad_model(frame_buf, TARGET_SR).item()
+                    prob = vad(frame_buf, TARGET_SR).item()
             except Exception:
                 continue
 

@@ -77,6 +77,7 @@ async def _stream_and_time(ws_url: str, audio: np.ndarray, language: str | None 
     partials: list[dict] = []
     infer_times: list[float] = []
     flush_latency_ms = 0.0
+    vad_final_text = ""
 
     async with ASRWebSocketClient(ws_url) as client:
         if language:
@@ -96,7 +97,8 @@ async def _stream_and_time(ws_url: str, audio: np.ndarray, language: str | None 
             if sleep_s > 0:
                 await asyncio.sleep(sleep_s)
 
-            # Drain any partial responses that arrived during this chunk window
+            # Drain any responses that arrived during this chunk window
+            t_after_sleep = time.perf_counter()
             while True:
                 try:
                     msg = await asyncio.wait_for(
@@ -106,8 +108,11 @@ async def _stream_and_time(ws_url: str, audio: np.ndarray, language: str | None 
                     # Latency = how long after the audio was "spoken" did the result arrive
                     latency_ms = (t_recv - t_start - t_audio_pos) * 1000
                     chunk_latencies_ms.append(latency_ms)
-                    infer_times.append(t_recv - t_sent)
-                    if msg.get("text"):
+                    infer_times.append(t_recv - t_after_sleep)
+                    if msg.get("is_final") and msg.get("text"):
+                        # VAD-triggered final during streaming — capture it
+                        vad_final_text = msg["text"]
+                    elif msg.get("text"):
                         partials.append({
                             "t_audio": round(t_audio_pos, 3),
                             "t_recv": round(t_recv - t_start, 3),
@@ -125,8 +130,10 @@ async def _stream_and_time(ws_url: str, audio: np.ndarray, language: str | None 
 
     rtf = sum(infer_times) / audio_duration if infer_times else 0.0
 
-    # Use last partial if flush returned empty (window already drained)
-    if not final_text and partials:
+    # Prefer VAD-triggered final, then flush result, then last partial
+    if not final_text and vad_final_text:
+        final_text = vad_final_text
+    elif not final_text and partials:
         final_text = partials[-1]["text"]
 
     return {
