@@ -691,7 +691,7 @@ async def websocket_transcribe(websocket: WebSocket):
                             t_infer = time.time()
                             text, _ = await _transcribe_with_context(
                                 audio_window, b"", pad_silence=True,
-                                lang_code=lang_code, use_vad=True,
+                                lang_code=lang_code, use_vad=False,
                             )
                             inference_ms = round((time.time() - t_infer) * 1000)
                             chunk_count += 1

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import gc
 import time
+import copy
 import threading
 import numpy as np
 from logger import log
@@ -203,14 +204,13 @@ def is_speech(audio_float32: np.ndarray, threshold: float = 0.5) -> bool:
         n = len(audio_float32)
         num_frames = min(4, n // VAD_FRAME_SAMPLES)
         step = max(1, (n - VAD_FRAME_SAMPLES) // max(1, num_frames - 1))
-        frame_buf = _torch.zeros(1, VAD_FRAME_SAMPLES)
         for i in range(num_frames):
             offset = min(i * step, n - VAD_FRAME_SAMPLES)
-            frame_buf[0].copy_(_torch.from_numpy(
+            frame_tensor = _torch.from_numpy(
                 audio_float32[offset:offset + VAD_FRAME_SAMPLES]
-            ))
+            ).unsqueeze(0)
             with _torch.inference_mode():
-                if _vad_model(frame_buf, TARGET_SR).item() >= threshold:
+                if _vad_model(frame_tensor, TARGET_SR).item() >= threshold:
                     return True
         return False
     except Exception as e:
@@ -227,11 +227,11 @@ def vad_confidence(audio_float32: np.ndarray) -> float:
     try:
         _vad_model.reset_states()
         # Check last frame for a quick confidence estimate
-        frame = audio_float32[-VAD_FRAME_SAMPLES:]
-        frame_buf = _torch.zeros(1, VAD_FRAME_SAMPLES)
-        frame_buf[0].copy_(_torch.from_numpy(frame))
+        frame_tensor = _torch.from_numpy(
+            audio_float32[-VAD_FRAME_SAMPLES:]
+        ).unsqueeze(0)
         with _torch.inference_mode():
-            return _vad_model(frame_buf, TARGET_SR).item()
+            return _vad_model(frame_tensor, TARGET_SR).item()
     except Exception as e:
         log.bind(error=str(e), samples=len(audio_float32)).warning("vad_confidence_error")
         return 1.0
@@ -277,16 +277,15 @@ class StreamingVAD:
         self._silence_frame_count = 0
         self._leftover = _EMPTY_F32
         self._total_frames = 0
-        # Pre-allocated tensor buffer for single-frame inference (avoids per-frame allocation)
-        self._frame_tensor = None  # lazily created when _torch is available
-        # Per-instance VAD model to avoid shared hidden state across sessions
+        # Per-instance VAD model to avoid shared hidden state across sessions.
+        # deepcopy is ~14x faster than load_silero_vad() (~2ms vs ~30ms)
         self._vad = None
-        try:
-            from silero_vad import load_silero_vad
-            self._vad = load_silero_vad()
-            self._vad.eval()
-        except Exception as e:
-            log.bind(error=str(e)).warning("streaming_vad_load_failed_using_global")
+        if _vad_model is not None:
+            try:
+                self._vad = copy.deepcopy(_vad_model)
+                self._vad.reset_states()
+            except Exception as e:
+                log.bind(error=str(e)).warning("streaming_vad_clone_failed_using_global")
 
     def reset(self) -> None:
         """Reset VAD state for a new utterance."""
@@ -319,10 +318,6 @@ class StreamingVAD:
         if vad is None or _torch is None:
             return None
 
-        # Lazily create reusable tensor buffer
-        if self._frame_tensor is None:
-            self._frame_tensor = _torch.zeros(1, VAD_FRAME_SAMPLES)
-
         # Prepend leftover from previous call
         if len(self._leftover) > 0:
             audio_float32 = np.concatenate([self._leftover, audio_float32])
@@ -333,17 +328,18 @@ class StreamingVAD:
         n = len(audio_float32)
         pos_thresh = self.positive_threshold
         neg_thresh = self.negative_threshold
-        frame_buf = self._frame_tensor
 
         while offset + VAD_FRAME_SAMPLES <= n:
-            # Copy frame data into pre-allocated tensor (avoids from_numpy + unsqueeze per frame)
-            frame_buf[0].copy_(_torch.from_numpy(audio_float32[offset:offset + VAD_FRAME_SAMPLES]))
+            # from_numpy on a contiguous slice is zero-copy; unsqueeze adds batch dim
+            frame_tensor = _torch.from_numpy(
+                audio_float32[offset:offset + VAD_FRAME_SAMPLES]
+            ).unsqueeze(0)
             offset += VAD_FRAME_SAMPLES
             self._total_frames += 1
 
             try:
                 with _torch.inference_mode():
-                    prob = vad(frame_buf, TARGET_SR).item()
+                    prob = vad(frame_tensor, TARGET_SR).item()
             except Exception:
                 continue
 
