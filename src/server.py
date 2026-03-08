@@ -152,6 +152,16 @@ WS_WINDOW_MAX_S = float(os.getenv("WS_WINDOW_MAX_S", "6.0"))
 WS_WINDOW_MAX_BYTES = int(WS_WINDOW_MAX_S * TARGET_SR * 2)
 # Pre-computed silence padding length in bytes (int16 samples)
 _SILENCE_PAD_BYTES_LEN = int(WS_FLUSH_SILENCE_MS / 1000 * TARGET_SR) * 2
+# Auto-reset: clear window when no audio arrives for this many ms.
+# Works with VAD-gated audio pipelines where silence = no frames.
+WS_AUTO_RESET_MS = int(os.getenv("WS_AUTO_RESET_MS", "800"))
+# Partial transcription: when false, only transcribe on flush (no sliding window).
+# Use with VAD-gated pipelines where upstream signals end-of-utterance.
+WS_PARTIAL = os.getenv("WS_PARTIAL", "true").lower() in ("true", "1", "yes")
+# Silence padding on flush: pad audio with silence before final transcription.
+# Helps capture trailing context in sliding window mode. Unnecessary with VAD-gated audio.
+# Defaults to match WS_PARTIAL (on for sliding window, off for buffer-only).
+WS_FLUSH_PAD_SILENCE = os.getenv("WS_FLUSH_PAD_SILENCE", str(WS_PARTIAL)).lower() in ("true", "1", "yes")
 
 
 def detect_and_fix_repetitions(text: str, max_repeats: int = 2) -> str:
@@ -220,6 +230,8 @@ async def lifespan(the_app):
         idle_timeout=IDLE_TIMEOUT,
         ws_buffer_size=WS_BUFFER_SIZE,
         ws_window_max_s=WS_WINDOW_MAX_S,
+        ws_partial=WS_PARTIAL,
+        ws_flush_pad_silence=WS_FLUSH_PAD_SILENCE,
     ).info("server_started")
     yield
     t_shutdown = time.time()
@@ -508,6 +520,8 @@ async def websocket_transcribe(websocket: WebSocket):
     audio_buffer = bytearray()
     audio_window = bytearray()
     lang_code: str | None = None
+    last_audio_time: float = 0.0  # monotonic time of last audio frame (for auto-reset)
+    last_final_text: str = ""  # duplicate suppression: last finalized transcript
     client_sr = int(websocket.query_params.get("sample_rate", str(TARGET_SR)))
     if client_sr not in (8000, 16000):
         ws_log.bind(sample_rate=client_sr).error("ws_unsupported_sample_rate")
@@ -535,6 +549,7 @@ async def websocket_transcribe(websocket: WebSocket):
             "format": "pcm_s16le",
             "buffer_size": WS_BUFFER_SIZE,
             "window_max_s": WS_WINDOW_MAX_S,
+            "partial": WS_PARTIAL,
         }))
 
         while True:
@@ -561,7 +576,7 @@ async def websocket_transcribe(websocket: WebSocket):
                             if len(audio_window) > 0:
                                 t_infer = time.time()
                                 text, lang, err = await _transcribe_with_context(
-                                    audio_window, pad_silence=True,
+                                    audio_window, pad_silence=WS_FLUSH_PAD_SILENCE,
                                     lang_code=lang_code,
                                 )
                                 inference_ms = round((time.time() - t_infer) * 1000)
@@ -573,6 +588,7 @@ async def websocket_transcribe(websocket: WebSocket):
                                 else:
                                     if text.strip():
                                         ws_log.bind(text=text[:80], text_len=len(text.strip()), lang=lang, is_final=True, inference_ms=inference_ms).debug("ws_transcript")
+                                    last_final_text = text.strip()
                                     await _ws_send_text(_json_encode({
                                         "text": text,
                                         "language": lang or None,
@@ -634,36 +650,54 @@ async def websocket_transcribe(websocket: WebSocket):
                     if _needs_resample:
                         incoming = _resample_pcm_bytes(incoming, client_sr)
 
-                    audio_buffer.extend(incoming)
+                    if WS_PARTIAL:
+                        # --- Sliding window mode: partial transcriptions ---
+                        # Auto-reset: if no audio arrived for WS_AUTO_RESET_MS,
+                        # clear the window so next utterance starts fresh.
+                        now = time.monotonic()
+                        if last_audio_time > 0 and WS_AUTO_RESET_MS > 0:
+                            gap_ms = (now - last_audio_time) * 1000
+                            if gap_ms >= WS_AUTO_RESET_MS and len(audio_window) > 0:
+                                ws_log.bind(gap_ms=round(gap_ms), window_bytes=len(audio_window)).info("ws_auto_reset")
+                                audio_buffer.clear()
+                                audio_window.clear()
+                        last_audio_time = now
 
-                    # Buffer-based partial transcription
-                    if len(audio_buffer) >= WS_BUFFER_SIZE:
-                        audio_window.extend(audio_buffer)
-                        audio_buffer.clear()
+                        audio_buffer.extend(incoming)
 
-                        if len(audio_window) > WS_WINDOW_MAX_BYTES:
-                            trim = len(audio_window) - WS_WINDOW_MAX_BYTES
-                            trim = (trim // 2) * 2
-                            del audio_window[:trim]
+                        if len(audio_buffer) >= WS_BUFFER_SIZE:
+                            audio_window.extend(audio_buffer)
+                            audio_buffer.clear()
 
-                        t_infer = time.time()
-                        text, lang, err = await _transcribe_with_context(
-                            audio_window, pad_silence=False,
-                            lang_code=lang_code,
-                        )
-                        inference_ms = round((time.time() - t_infer) * 1000)
-                        chunk_count += 1
-                        if err:
-                            ws_log.bind(error=err, inference_ms=inference_ms).warning("ws_partial_transcribe_error")
-                        elif text:
-                            if text.strip():
-                                ws_log.bind(text=text[:80], text_len=len(text.strip()), lang=lang, is_final=False, inference_ms=inference_ms).debug("ws_transcript")
-                            await _ws_send_text(_json_encode({
-                                "text": text,
-                                "language": lang or None,
-                                "is_partial": True,
-                                "is_final": False,
-                            }))
+                            if len(audio_window) > WS_WINDOW_MAX_BYTES:
+                                trim = len(audio_window) - WS_WINDOW_MAX_BYTES
+                                trim = (trim // 2) * 2
+                                del audio_window[:trim]
+
+                            t_infer = time.time()
+                            text, lang, err = await _transcribe_with_context(
+                                audio_window, pad_silence=False,
+                                lang_code=lang_code,
+                            )
+                            inference_ms = round((time.time() - t_infer) * 1000)
+                            chunk_count += 1
+                            if err:
+                                ws_log.bind(error=err, inference_ms=inference_ms).warning("ws_partial_transcribe_error")
+                            elif text:
+                                if text.strip() and text.strip() == last_final_text:
+                                    ws_log.bind(text=text[:80]).debug("ws_duplicate_suppressed")
+                                else:
+                                    if text.strip():
+                                        ws_log.bind(text=text[:80], text_len=len(text.strip()), lang=lang, is_final=False, inference_ms=inference_ms).debug("ws_transcript")
+                                    await _ws_send_text(_json_encode({
+                                        "text": text,
+                                        "language": lang or None,
+                                        "is_partial": True,
+                                        "is_final": False,
+                                    }))
+                    else:
+                        # --- Buffer-only mode: just accumulate, transcribe on flush ---
+                        audio_buffer.extend(incoming)
 
             except WebSocketDisconnect:
                 discarded_bytes = len(audio_buffer) + len(audio_window)
