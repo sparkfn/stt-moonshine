@@ -89,7 +89,9 @@ class InterceptHandler(logging.Handler):
         while frame.f_code.co_filename == logging.__file__:
             if frame.f_back:
                 frame = frame.f_back
-            depth += 1
+                depth += 1
+            else:
+                break
         logger.opt(depth=depth, exception=record.exc_info).log(
             level, record.getMessage()
         )

@@ -182,10 +182,6 @@ def touch():
     _last_used = time.time()
 
 
-def get_vad_model():
-    return _vad_model
-
-
 def is_speech(audio_float32: np.ndarray, threshold: float = 0.5) -> bool:
     """Check if audio contains speech using Silero VAD.
 
@@ -293,7 +289,8 @@ class StreamingVAD:
                     self._vad.reset_states()
                 except Exception as e2:
                     log.bind(error=str(e2)).error("streaming_vad_load_failed_vad_disabled")
-                    # self._vad stays None — process() will return None (VAD disabled)
+        else:
+            log.warning("streaming_vad_created_without_model_vad_disabled")
 
     def reset(self) -> None:
         """Reset VAD state for a new utterance."""
@@ -389,6 +386,11 @@ class StreamingVAD:
     @property
     def speech_active(self) -> bool:
         return self._speech_active
+
+    @property
+    def is_functional(self) -> bool:
+        """True if this instance has a working VAD model."""
+        return self._vad is not None
 
 
 def detect_language(audio_float32: np.ndarray) -> str:

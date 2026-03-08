@@ -304,6 +304,7 @@ async def health():
 
 def _do_transcribe(audio, sr, lang_code, skip_denoise=False) -> tuple[str, str]:
     """Run pipeline transcription. Returns (text, language)."""
+    models.touch()
     return pipeline.process_audio(audio, sr, lang_code, skip_denoise=skip_denoise)
 
 
@@ -473,15 +474,13 @@ async def transcribe_stream(
 
 async def _transcribe_with_context(
     audio_bytes: bytes | bytearray,
-    overlap: bytes | bytearray,
     pad_silence: bool = False,
     lang_code: str | None = None,
     use_vad: bool = True,
 ) -> tuple[str, str]:
     """Transcribe PCM audio with optional silence padding. Returns (text, language)."""
     n_audio = len(audio_bytes)
-    n_overlap = len(overlap)
-    n_total = n_audio + n_overlap
+    n_total = n_audio
     if pad_silence:
         n_total += _SILENCE_PAD_BYTES_LEN
 
@@ -490,9 +489,7 @@ async def _transcribe_with_context(
 
     # Single allocation; trailing zeros serve as silence padding (bytearray inits to 0)
     buf = bytearray(n_total)
-    if n_overlap:
-        buf[:n_overlap] = overlap
-    buf[n_overlap:n_overlap + n_audio] = audio_bytes
+    buf[:n_audio] = audio_bytes
     # Silence: remaining bytes already zero from bytearray init
 
     # int16 → float32 with in-place multiply (avoids extra array from division)
@@ -500,15 +497,14 @@ async def _transcribe_with_context(
     audio *= _INV_32768
     audio = _telephony_bandpass(audio)
 
-    if use_vad and not models.is_speech(audio):
-        return "", ""
+    def _vad_then_transcribe():
+        if use_vad and not models.is_speech(audio):
+            return "", ""
+        return _do_transcribe(audio, TARGET_SR, lang_code, skip_denoise=WS_SKIP_DENOISE)
 
     try:
         text, lang = await asyncio.wait_for(
-            _infer_queue.submit(
-                lambda: _do_transcribe(audio, TARGET_SR, lang_code, skip_denoise=WS_SKIP_DENOISE),
-                priority=0,
-            ),
+            _infer_queue.submit(_vad_then_transcribe, priority=0),
             timeout=REQUEST_TIMEOUT,
         )
         return detect_and_fix_repetitions(text), lang
@@ -569,10 +565,16 @@ async def websocket_transcribe(websocket: WebSocket):
         await _ensure_model_loaded()
 
         # Create StreamingVAD AFTER models are loaded — deepcopy needs _vad_model
-        streaming_vad = models.StreamingVAD(
-            positive_threshold=0.3, negative_threshold=0.25,
-            redemption_ms=400, min_speech_ms=250,
-        ) if use_vad else None
+        streaming_vad = None
+        if use_vad:
+            streaming_vad = models.StreamingVAD(
+                positive_threshold=0.3, negative_threshold=0.25,
+                redemption_ms=400, min_speech_ms=250,
+            )
+            if not streaming_vad.is_functional:
+                ws_log.warning("ws_vad_requested_but_model_unavailable")
+                streaming_vad = None
+                use_vad = False
 
         await _ws_send_text(_json_encode({
             "status": "connected",
@@ -611,7 +613,7 @@ async def websocket_transcribe(websocket: WebSocket):
                         if len(audio_window) > 0:
                             t_infer = time.time()
                             text, _ = await _transcribe_with_context(
-                                audio_window, b"", pad_silence=True,
+                                audio_window, pad_silence=True,
                                 lang_code=lang_code, use_vad=False,
                             )
                             inference_ms = round((time.time() - t_infer) * 1000)
@@ -647,7 +649,7 @@ async def websocket_transcribe(websocket: WebSocket):
                             if len(audio_window) > 0:
                                 t_infer = time.time()
                                 text, _ = await _transcribe_with_context(
-                                    audio_window, b"", pad_silence=True,
+                                    audio_window, pad_silence=True,
                                     lang_code=lang_code, use_vad=use_vad,
                                 )
                                 inference_ms = round((time.time() - t_infer) * 1000)
@@ -714,6 +716,10 @@ async def websocket_transcribe(websocket: WebSocket):
                 elif "bytes" in data:
                     audio_frame_count += 1
                     incoming = data["bytes"]
+                    if len(incoming) % 2 != 0:
+                        incoming = incoming[:-1]  # trim trailing byte for int16 alignment
+                    if not incoming:
+                        continue
                     if _needs_resample:
                         incoming = _resample_pcm_bytes(incoming, client_sr)
 
@@ -739,7 +745,7 @@ async def websocket_transcribe(websocket: WebSocket):
                         if len(audio_window) > 0:
                             t_infer = time.time()
                             text, _ = await _transcribe_with_context(
-                                audio_window, b"", pad_silence=True,
+                                audio_window, pad_silence=True,
                                 lang_code=lang_code, use_vad=False,
                             )
                             inference_ms = round((time.time() - t_infer) * 1000)
@@ -766,7 +772,7 @@ async def websocket_transcribe(websocket: WebSocket):
 
                         t_infer = time.time()
                         text, _ = await _transcribe_with_context(
-                            audio_window, b"", pad_silence=False,
+                            audio_window, pad_silence=False,
                             lang_code=lang_code, use_vad=use_vad,
                         )
                         inference_ms = round((time.time() - t_infer) * 1000)
