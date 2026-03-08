@@ -285,7 +285,15 @@ class StreamingVAD:
                 self._vad = copy.deepcopy(_vad_model)
                 self._vad.reset_states()
             except Exception as e:
-                log.bind(error=str(e)).warning("streaming_vad_clone_failed_using_global")
+                log.bind(error=str(e)).warning("streaming_vad_deepcopy_failed_trying_fresh_load")
+                try:
+                    from silero_vad import load_silero_vad
+                    self._vad = load_silero_vad()
+                    self._vad.eval()
+                    self._vad.reset_states()
+                except Exception as e2:
+                    log.bind(error=str(e2)).error("streaming_vad_load_failed_vad_disabled")
+                    # self._vad stays None — process() will return None (VAD disabled)
 
     def reset(self) -> None:
         """Reset VAD state for a new utterance."""
@@ -299,8 +307,6 @@ class StreamingVAD:
                 self._vad.reset_states()
             except Exception:
                 pass
-        else:
-            reset_vad_state()
 
     def process(self, audio_float32: np.ndarray) -> str | None:
         """Feed audio through VAD frame-by-frame.
@@ -314,7 +320,7 @@ class StreamingVAD:
             "speech_end"   — silence after speech exceeded redemption period
             None           — no state transition
         """
-        vad = self._vad or _vad_model
+        vad = self._vad
         if vad is None or _torch is None:
             return None
 
