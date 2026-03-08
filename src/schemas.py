@@ -25,7 +25,7 @@ class HealthResponse(BaseModel):
     gpu_allocated_mb: Optional[int] = Field(None, description="GPU memory currently allocated (MB)")
     gpu_reserved_mb: Optional[int] = Field(None, description="GPU memory currently reserved by PyTorch (MB)")
     worker_alive: Optional[bool] = Field(None, description="Not used (compatibility with qwen3-asr)")
-    subsystems: Optional[dict] = Field(None, description="Status of each subsystem: vad, lid, stt_en, stt_zh")
+    subsystems: Optional[dict] = Field(None, description="Status of each subsystem: stt_en, stt_zh")
 
 
 class TranscriptionResponse(BaseModel):
@@ -55,10 +55,9 @@ class WebSocketHandshake(BaseModel):
     status: str = Field(..., description="Connection status", examples=["connected"])
     buffer_size: int = Field(..., description="Audio buffer size in bytes before inference triggers")
     window_max_s: float = Field(..., description="Maximum sliding window duration in seconds")
-    use_server_vad: bool = Field(..., description="Whether server-side VAD is enabled for this connection")
     sample_rate: int = Field(..., description="Expected input sample rate in Hz", examples=[16000])
 
-    model_config = {"json_schema_extra": {"examples": [{"status": "connected", "buffer_size": 14400, "window_max_s": 6.0, "use_server_vad": True, "sample_rate": 16000}]}}
+    model_config = {"json_schema_extra": {"examples": [{"status": "connected", "buffer_size": 14400, "window_max_s": 6.0, "sample_rate": 16000}]}}
 
 
 class WebSocketTranscript(BaseModel):
@@ -92,14 +91,13 @@ API_TAGS = [
 ]
 
 API_DESCRIPTION = """\
-Speech-to-text API powered by Moonshine with Silero VAD/LID pipeline.
+Speech-to-text API powered by Moonshine ONNX models (English + Chinese).
 
 ## Features
 - **OpenAI-compatible** `/v1/audio/transcriptions` endpoint
 - **Dual-language**: English and Chinese via language-routed Moonshine models
-- **Real-time WebSocket** streaming with sliding window and VAD
+- **Real-time WebSocket** streaming with sliding window
 - **SSE streaming** for chunked transcription of long files
-- **Noise suppression** via noisereduce
 - **Drop-in replacement** for qwen3-asr API
 
 ## Audio Formats
@@ -107,4 +105,5 @@ Supported: WAV, FLAC, MP3, OGG, AIFF, CAF, AU, W64, RF64.
 
 ## WebSocket Protocol
 Connect to `/ws/transcribe` and send raw PCM audio (16-bit LE, 16kHz mono).
+Client controls flush timing — server transcribes on demand.
 """

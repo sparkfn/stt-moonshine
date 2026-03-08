@@ -77,7 +77,7 @@ async def _stream_and_time(ws_url: str, audio: np.ndarray, language: str | None 
     partials: list[dict] = []
     infer_times: list[float] = []
     flush_latency_ms = 0.0
-    vad_final_text = ""
+    mid_stream_final_text = ""
 
     async with ASRWebSocketClient(ws_url) as client:
         if language:
@@ -110,8 +110,7 @@ async def _stream_and_time(ws_url: str, audio: np.ndarray, language: str | None 
                     chunk_latencies_ms.append(latency_ms)
                     infer_times.append(t_recv - t_after_sleep)
                     if msg.get("is_final") and msg.get("text"):
-                        # VAD-triggered final during streaming — capture it
-                        vad_final_text = msg["text"]
+                        mid_stream_final_text = msg["text"]
                     elif msg.get("text"):
                         partials.append({
                             "t_audio": round(t_audio_pos, 3),
@@ -130,9 +129,9 @@ async def _stream_and_time(ws_url: str, audio: np.ndarray, language: str | None 
 
     rtf = sum(infer_times) / audio_duration if infer_times else 0.0
 
-    # Prefer VAD-triggered final, then flush result, then last partial
-    if not final_text and vad_final_text:
-        final_text = vad_final_text
+    # Prefer mid-stream final, then flush result, then last partial
+    if not final_text and mid_stream_final_text:
+        final_text = mid_stream_final_text
     elif not final_text and partials:
         final_text = partials[-1]["text"]
 

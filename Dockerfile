@@ -13,7 +13,6 @@ ENV ONNXRUNTIME_EXECUTION_MODE=1
 # All model caches under one tree for easy bind-mounting
 ENV HF_HOME=/data/cache/huggingface
 ENV MOONSHINE_VOICE_CACHE=/data/cache/moonshine
-ENV SPEECHBRAIN_CACHE=/data/cache/speechbrain
 
 # System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \

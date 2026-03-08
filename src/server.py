@@ -15,8 +15,6 @@ import time
 import heapq
 import dataclasses
 import numpy as np
-from scipy.signal import butter, sosfilt
-
 try:
     import librosa as _librosa
 except ImportError:
@@ -43,9 +41,6 @@ TARGET_SR = 16000
 
 # ── Pre-computed constants (avoid recomputation on every call) ──────────
 
-# Bandpass filter coefficients: computed once, reused for all WS transcriptions
-_BANDPASS_SOS = butter(4, [300, 3400], btype="bandpass", fs=TARGET_SR, output="sos")
-
 # Multiplier for int16 → float32 normalization (avoids division per call)
 _INV_32768 = np.float32(1.0 / 32768.0)
 
@@ -65,11 +60,11 @@ _LANG_NAME_TO_CODE = {
 _LANG_CODE_TO_NAME = {"en": "English", "zh": "Chinese"}
 
 
-def _normalize_lang_input(language: str) -> str | None:
-    """Convert client language param to pipeline code. Returns None for 'auto'."""
+def _normalize_lang_input(language: str) -> str:
+    """Convert client language param to pipeline code. Defaults to 'en'."""
     if language is None or language.lower() in ("auto", ""):
-        return None
-    return _LANG_NAME_TO_CODE.get(language.lower(), language.lower())
+        return "en"
+    return _LANG_NAME_TO_CODE.get(language.lower(), "en")
 
 
 def _format_lang_output(detected: str, requested: str) -> str:
@@ -77,11 +72,6 @@ def _format_lang_output(detected: str, requested: str) -> str:
     if requested is None or requested.lower() in ("auto", ""):
         return _LANG_CODE_TO_NAME.get(detected, detected)
     return requested
-
-
-def _telephony_bandpass(audio: np.ndarray) -> np.ndarray:
-    """Apply pre-computed bandpass filter. Returns float32."""
-    return sosfilt(_BANDPASS_SOS, audio).astype(np.float32)
 
 
 def _resample_pcm_bytes(pcm_bytes: bytes, orig_sr: int) -> bytes:
@@ -162,9 +152,6 @@ WS_BUFFER_SIZE = int(os.getenv("WS_BUFFER_SIZE", str(int(TARGET_SR * 2 * 0.2))))
 WS_FLUSH_SILENCE_MS = int(os.getenv("WS_FLUSH_SILENCE_MS", "600"))
 WS_WINDOW_MAX_S = float(os.getenv("WS_WINDOW_MAX_S", "6.0"))
 WS_WINDOW_MAX_BYTES = int(WS_WINDOW_MAX_S * TARGET_SR * 2)
-ASR_USE_SERVER_VAD = os.getenv("ASR_USE_SERVER_VAD", "true").lower() == "true"
-WS_SKIP_DENOISE = os.getenv("WS_SKIP_DENOISE", "true").lower() == "true"
-
 # Pre-computed silence padding length in bytes (int16 samples)
 _SILENCE_PAD_BYTES_LEN = int(WS_FLUSH_SILENCE_MS / 1000 * TARGET_SR) * 2
 
@@ -235,8 +222,6 @@ async def lifespan(the_app):
         idle_timeout=IDLE_TIMEOUT,
         ws_buffer_size=WS_BUFFER_SIZE,
         ws_window_max_s=WS_WINDOW_MAX_S,
-        use_server_vad=ASR_USE_SERVER_VAD,
-        ws_skip_denoise=WS_SKIP_DENOISE,
     ).info("server_started")
     yield
     t_shutdown = time.time()
@@ -304,10 +289,10 @@ async def health():
     }
 
 
-def _do_transcribe(audio, sr, lang_code, skip_denoise=False) -> tuple[str, str]:
+def _do_transcribe(audio, sr, lang_code) -> tuple[str, str]:
     """Run pipeline transcription. Returns (text, language)."""
     models.touch()
-    return pipeline.process_audio(audio, sr, lang_code, skip_denoise=skip_denoise)
+    return pipeline.process_audio(audio, sr, lang_code)
 
 
 @app.post(
@@ -480,39 +465,18 @@ async def _transcribe_with_context(
     audio_bytes: bytes | bytearray,
     pad_silence: bool = False,
     lang_code: str | None = None,
-    use_vad: bool = True,
 ) -> tuple[str, str, str | None]:
-    """Transcribe PCM audio with optional silence padding.
-
-    Returns (text, language, error_code).
-    error_code is None on success, or a string like "TRANSCRIPTION_TIMEOUT".
-    """
     n_audio = len(audio_bytes)
-    n_total = n_audio
-    if pad_silence:
-        n_total += _SILENCE_PAD_BYTES_LEN
-
+    n_total = n_audio + (_SILENCE_PAD_BYTES_LEN if pad_silence else 0)
     if n_total == 0:
         return "", "", None
-
-    # Single allocation; trailing zeros serve as silence padding (bytearray inits to 0)
     buf = bytearray(n_total)
     buf[:n_audio] = audio_bytes
-    # Silence: remaining bytes already zero from bytearray init
-
-    # int16 → float32 with in-place multiply (avoids extra array from division)
     audio = np.frombuffer(buf, dtype=np.int16).astype(np.float32)
     audio *= _INV_32768
-    audio = _telephony_bandpass(audio)
-
-    def _vad_then_transcribe():
-        if use_vad and not models.is_speech(audio):
-            return "", ""
-        return _do_transcribe(audio, TARGET_SR, lang_code, skip_denoise=WS_SKIP_DENOISE)
-
     try:
         text, lang = await asyncio.wait_for(
-            _infer_queue.submit(_vad_then_transcribe, priority=0),
+            _infer_queue.submit(lambda: _do_transcribe(audio, TARGET_SR, lang_code), priority=0),
             timeout=REQUEST_TIMEOUT,
         )
         return detect_and_fix_repetitions(text), lang, None
@@ -542,10 +506,6 @@ async def websocket_transcribe(websocket: WebSocket):
     audio_buffer = bytearray()
     audio_window = bytearray()
     lang_code: str | None = None
-    use_vad: bool = ASR_USE_SERVER_VAD
-    vad_param = websocket.query_params.get("use_server_vad")
-    if vad_param is not None:
-        use_vad = vad_param.lower() in ("true", "1", "yes")
     client_sr = int(websocket.query_params.get("sample_rate", str(TARGET_SR)))
     if client_sr not in (8000, 16000):
         ws_log.bind(sample_rate=client_sr).error("ws_unsupported_sample_rate")
@@ -559,12 +519,6 @@ async def websocket_transcribe(websocket: WebSocket):
 
     chunk_count = 0
 
-    # Timeout for receive() when VAD speech is active — if no audio arrives
-    # within this window, assume the client stopped sending and force speech_end.
-    # Many clients stop forwarding audio when their own VAD detects silence,
-    # so the server never sees silence frames to trigger speech_end normally.
-    _VAD_RECV_TIMEOUT = 0.6  # seconds (slightly above redemption_ms=400)
-
     # Local references for hot-loop performance
     _frombuffer = np.frombuffer
     _ws_send_text = websocket.send_text
@@ -573,74 +527,17 @@ async def websocket_transcribe(websocket: WebSocket):
     try:
         await _ensure_model_loaded()
 
-        # Create StreamingVAD AFTER models are loaded — deepcopy needs _vad_model
-        streaming_vad = None
-        if use_vad:
-            streaming_vad = models.StreamingVAD(
-                positive_threshold=0.3, negative_threshold=0.25,
-                redemption_ms=400, min_speech_ms=250,
-            )
-            if not streaming_vad.is_functional:
-                ws_log.warning("ws_vad_requested_but_model_unavailable")
-                streaming_vad = None
-                use_vad = False
-
         await _ws_send_text(_json_encode({
             "status": "connected",
             "sample_rate": client_sr,
             "format": "pcm_s16le",
             "buffer_size": WS_BUFFER_SIZE,
             "window_max_s": WS_WINDOW_MAX_S,
-            "use_server_vad": use_vad,
         }))
 
         while True:
             try:
-                # When VAD detects active speech, use a short receive timeout.
-                # If the client stops sending audio (common when client-side VAD
-                # detects silence), we force speech_end rather than waiting for
-                # the client's flush watchdog (typically 3s).
-                _recv_timeout = _VAD_RECV_TIMEOUT if (streaming_vad and streaming_vad.speech_active) else None
-                try:
-                    if _recv_timeout is not None:
-                        data = await asyncio.wait_for(websocket.receive(), timeout=_recv_timeout)
-                    else:
-                        data = await websocket.receive()
-                except asyncio.TimeoutError:
-                    # No audio arrived while speech was active — client likely
-                    # stopped sending. Force speech_end to avoid waiting for
-                    # the client's silence watchdog (saves ~2-3s latency).
-                    if streaming_vad and streaming_vad.speech_active:
-                        ws_log.bind(
-                            frame=audio_frame_count,
-                            timeout_s=_VAD_RECV_TIMEOUT,
-                            window_bytes=len(audio_window) + len(audio_buffer),
-                        ).info("vad_speech_end_timeout")
-                        audio_window.extend(audio_buffer)
-                        audio_buffer.clear()
-
-                        if len(audio_window) > 0:
-                            t_infer = time.time()
-                            text, lang, err = await _transcribe_with_context(
-                                audio_window, pad_silence=True,
-                                lang_code=lang_code, use_vad=False,
-                            )
-                            inference_ms = round((time.time() - t_infer) * 1000)
-                            chunk_count += 1
-                            if err:
-                                await _ws_send_text(_json_encode(ws_error(err, f"Transcription failed: {err}")))
-                            else:
-                                if text and text.strip():
-                                    ws_log.bind(text=text[:80], text_len=len(text.strip()), lang=lang, is_final=True, inference_ms=inference_ms).info("vad_transcript_final_timeout")
-                                await _ws_send_text(_json_encode({
-                                    "text": text,
-                                    "language": lang or None,
-                                    "is_partial": False,
-                                    "is_final": True,
-                                }))
-                        audio_window.clear()
-                        streaming_vad.reset()
-                    continue
+                data = await websocket.receive()
 
                 msg_count += 1
 
@@ -663,7 +560,7 @@ async def websocket_transcribe(websocket: WebSocket):
                                 t_infer = time.time()
                                 text, lang, err = await _transcribe_with_context(
                                     audio_window, pad_silence=True,
-                                    lang_code=lang_code, use_vad=use_vad,
+                                    lang_code=lang_code,
                                 )
                                 inference_ms = round((time.time() - t_infer) * 1000)
                                 chunk_count += 1
@@ -683,15 +580,11 @@ async def websocket_transcribe(websocket: WebSocket):
                             else:
                                 await _ws_send_text(_WS_EMPTY_FINAL)
                             audio_window.clear()
-                            if streaming_vad:
-                                streaming_vad.reset()
 
                         elif action == "reset":
                             ws_log.info("ws_reset")
                             audio_buffer.clear()
                             audio_window.clear()
-                            if streaming_vad:
-                                streaming_vad.reset()
                             await _ws_send_text(_WS_BUFFER_RESET)
 
                         elif action == "config":
@@ -700,20 +593,10 @@ async def websocket_transcribe(websocket: WebSocket):
                                 lang_code = None
                             elif new_lang:
                                 lang_code = new_lang
-                            if "use_server_vad" in msg:
-                                use_vad = bool(msg["use_server_vad"])
-                                if use_vad and streaming_vad is None:
-                                    streaming_vad = models.StreamingVAD(
-                                        positive_threshold=0.3, negative_threshold=0.25,
-                                        redemption_ms=400, min_speech_ms=250,
-                                    )
-                                elif not use_vad and streaming_vad is not None:
-                                    streaming_vad = None
-                            ws_log.bind(language=lang_code or "auto", use_server_vad=use_vad).info("ws_configured")
+                            ws_log.bind(language=lang_code or "auto").info("ws_configured")
                             await _ws_send_text(_json_encode({
                                 "status": "configured",
                                 "language": lang_code or "auto",
-                                "use_server_vad": use_vad,
                             }))
 
                         else:
@@ -743,55 +626,16 @@ async def websocket_transcribe(websocket: WebSocket):
                     audio_frame_count += 1
                     incoming = data["bytes"]
                     if len(incoming) % 2 != 0:
-                        incoming = incoming[:-1]  # trim trailing byte for int16 alignment
+                        incoming = incoming[:-1]
                     if not incoming:
                         continue
                     if _needs_resample:
                         incoming = _resample_pcm_bytes(incoming, client_sr)
 
-                    # Feed every frame through streaming VAD
-                    _vad_event = None
-                    if streaming_vad:
-                        # int16 → float32 with in-place multiply (one less array copy)
-                        _incoming_float = _frombuffer(incoming, dtype=np.int16).astype(np.float32)
-                        _incoming_float *= _INV_32768
-                        _vad_event = streaming_vad.process(_incoming_float)
-                        if _vad_event == "speech_start":
-                            ws_log.bind(frame=audio_frame_count, window_bytes=len(audio_window) + len(audio_buffer)).debug("vad_speech_start")
-                        elif _vad_event == "speech_end":
-                            ws_log.bind(frame=audio_frame_count, window_bytes=len(audio_window) + len(audio_buffer)).info("vad_speech_end")
-
                     audio_buffer.extend(incoming)
 
-                    # VAD detected end of speech — transcribe immediately
-                    if _vad_event == "speech_end":
-                        audio_window.extend(audio_buffer)
-                        audio_buffer.clear()
-
-                        if len(audio_window) > 0:
-                            t_infer = time.time()
-                            text, lang, err = await _transcribe_with_context(
-                                audio_window, pad_silence=True,
-                                lang_code=lang_code, use_vad=False,
-                            )
-                            inference_ms = round((time.time() - t_infer) * 1000)
-                            chunk_count += 1
-                            if err:
-                                await _ws_send_text(_json_encode(ws_error(err, f"Transcription failed: {err}")))
-                            else:
-                                if text and text.strip():
-                                    ws_log.bind(text=text[:80], text_len=len(text.strip()), lang=lang, is_final=True, inference_ms=inference_ms).info("vad_transcript_final")
-                                await _ws_send_text(_json_encode({
-                                    "text": text,
-                                    "language": lang or None,
-                                    "is_partial": False,
-                                    "is_final": True,
-                                }))
-                        audio_window.clear()
-                        streaming_vad.reset()
-
-                    # Normal buffer-based partial transcription
-                    elif len(audio_buffer) >= WS_BUFFER_SIZE:
+                    # Buffer-based partial transcription
+                    if len(audio_buffer) >= WS_BUFFER_SIZE:
                         audio_window.extend(audio_buffer)
                         audio_buffer.clear()
 
@@ -803,14 +647,12 @@ async def websocket_transcribe(websocket: WebSocket):
                         t_infer = time.time()
                         text, lang, err = await _transcribe_with_context(
                             audio_window, pad_silence=False,
-                            lang_code=lang_code, use_vad=use_vad,
+                            lang_code=lang_code,
                         )
                         inference_ms = round((time.time() - t_infer) * 1000)
                         chunk_count += 1
                         if err:
                             ws_log.bind(error=err, inference_ms=inference_ms).warning("ws_partial_transcribe_error")
-                            # Don't send error for partials — they're best-effort.
-                            # But DO log so it's visible.
                         elif text:
                             if text.strip():
                                 ws_log.bind(text=text[:80], text_len=len(text.strip()), lang=lang, is_final=False, inference_ms=inference_ms).debug("ws_transcript")
