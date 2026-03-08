@@ -67,7 +67,7 @@ _LANG_CODE_TO_NAME = {"en": "English", "zh": "Chinese"}
 
 def _normalize_lang_input(language: str) -> str | None:
     """Convert client language param to pipeline code. Returns None for 'auto'."""
-    if language.lower() in ("auto", ""):
+    if language is None or language.lower() in ("auto", ""):
         return None
     return _LANG_NAME_TO_CODE.get(language.lower(), language.lower())
 
@@ -500,7 +500,7 @@ async def _transcribe_with_context(
     audio *= _INV_32768
     audio = _telephony_bandpass(audio)
 
-    if use_vad and not models.is_speech(audio):
+    if use_vad and not models.is_speech(audio[-min(len(audio), 8000):]):
         return "", ""
 
     try:
@@ -632,6 +632,13 @@ async def websocket_transcribe(websocket: WebSocket):
                                 lang_code = new_lang
                             if "use_server_vad" in msg:
                                 use_vad = bool(msg["use_server_vad"])
+                                if use_vad and streaming_vad is None:
+                                    streaming_vad = models.StreamingVAD(
+                                        positive_threshold=0.3, negative_threshold=0.25,
+                                        redemption_ms=400, min_speech_ms=250,
+                                    )
+                                elif not use_vad and streaming_vad is not None:
+                                    streaming_vad = None
                             ws_log.bind(language=lang_code or "auto", use_server_vad=use_vad).info("ws_configured")
                             await _ws_send_text(_json_encode({
                                 "status": "configured",
@@ -706,7 +713,7 @@ async def websocket_transcribe(websocket: WebSocket):
                         if len(audio_window) > WS_WINDOW_MAX_BYTES:
                             trim = len(audio_window) - WS_WINDOW_MAX_BYTES
                             trim = (trim // 2) * 2
-                            audio_window = audio_window[trim:]
+                            del audio_window[:trim]
 
                         t_infer = time.time()
                         text, _ = await _transcribe_with_context(

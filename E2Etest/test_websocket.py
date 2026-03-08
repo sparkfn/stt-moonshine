@@ -80,6 +80,7 @@ class TestWebSocketAudioStreaming:
             response = await client.flush()
             assert isinstance(response, dict)
             assert "text" in response
+            assert response.get("is_final") is True
 
     @pytest.mark.asyncio
     async def test_flush_empty_buffer(self, ws_url: str, ensure_server):
@@ -127,7 +128,7 @@ class TestWebSocketAudioStreaming:
         await client.close()
 
         # Should not raise an exception
-        assert True
+        assert client.websocket is None
 
 
 # =============================================================================
@@ -170,7 +171,7 @@ class TestWebSocketCommands:
         async with ASRWebSocketClient(ws_url) as client:
             await client.websocket.send("not valid json")
             response = await asyncio.wait_for(client.receive(), timeout=5)
-            assert "code" in response or "error" in response
+            assert response.get("code") == "INVALID_JSON"
 
     @pytest.mark.asyncio
     async def test_unknown_action_handled(self, ws_url: str, ensure_server):

@@ -119,17 +119,9 @@ async def _stream_and_time(ws_url: str, audio: np.ndarray, language: str | None 
 
         # Flush -- collects trailing audio and pads silence
         t_flush = time.perf_counter()
-        await client.websocket.send(json.dumps({"action": "flush"}))
-
-        final_text = ""
-        for _ in range(100):
-            msg = await asyncio.wait_for(client.receive(), timeout=60)
-            if msg.get("is_final"):
-                flush_latency_ms = (time.perf_counter() - t_flush) * 1000
-                final_text = msg.get("text", "")
-                break
-        else:
-            raise TimeoutError("flush drain did not receive final result")
+        final_msg = await client.flush()
+        flush_latency_ms = (time.perf_counter() - t_flush) * 1000
+        final_text = final_msg.get("text", "")
 
     rtf = sum(infer_times) / audio_duration if infer_times else 0.0
 

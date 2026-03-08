@@ -200,7 +200,7 @@ class ASRWebSocketClient:
             raise RuntimeError("WebSocket not connected")
         await self.websocket.send(audio_bytes)
 
-    async def send_audio_chunk(self, audio_array: np.ndarray, sr: int = 16000):
+    async def send_audio_chunk(self, audio_array: np.ndarray):
         """Send audio as numpy array (will convert to int16 PCM)."""
         # Ensure correct format
         if audio_array.dtype != np.int16:
@@ -274,8 +274,6 @@ class ASRWebSocketClient:
         bytes_per_sample = 2  # int16
         samples_per_chunk = int(16000 * chunk_duration_ms / 1000)
         samples_overlap = int(16000 * overlap_ms / 1000)
-        chunk_size_bytes = samples_per_chunk * bytes_per_sample
-
         # Stream chunks
         idx = 0
         while idx < len(audio):

@@ -99,7 +99,9 @@ _STDLIB_LEVEL_MAP = {"TRACE": "DEBUG"}
 
 
 def setup_logger() -> "loguru.Logger":
-    log_level = os.getenv("LOG_LEVEL", "info").upper()
+    log_level = os.getenv("LOG_LEVEL", "info")
+    _LOG_LEVEL_ALIASES = {"WARN": "WARNING", "FATAL": "CRITICAL"}
+    log_level = _LOG_LEVEL_ALIASES.get(log_level.upper(), log_level.upper()) if log_level else "INFO"
     logging.root.handlers = [InterceptHandler()]
     stdlib_level = _STDLIB_LEVEL_MAP.get(log_level, log_level)
     logging.root.setLevel(stdlib_level)
