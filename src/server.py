@@ -4,7 +4,6 @@ from errors import error_response, ws_error, INVALID_REQUEST, SERVER_ERROR
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
-import sys
 import io
 import os
 import uuid as _uuid_module
@@ -36,8 +35,7 @@ except ImportError:
 import soundfile as sf
 import models
 import pipeline
-
-TARGET_SR = 16000
+from config import TARGET_SR
 
 # ── Pre-computed constants (avoid recomputation on every call) ──────────
 
@@ -269,8 +267,12 @@ async def _request_id_middleware(request: Request, call_next):
 )
 async def health():
     gpu_info = {}
-    torch = sys.modules.get("torch")
-    cuda_available = torch.cuda.is_available() if torch is not None else False
+    try:
+        import torch
+        cuda_available = torch.cuda.is_available()
+    except ImportError:
+        cuda_available = False
+        torch = None
     if cuda_available and models.is_loaded():
         gpu_info = {
             "gpu_name": torch.cuda.get_device_name(0),

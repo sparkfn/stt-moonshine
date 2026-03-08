@@ -23,7 +23,7 @@ class HealthResponse(BaseModel):
     cuda: Optional[bool] = Field(None, description="Whether CUDA is available")
     gpu_name: Optional[str] = Field(None, description="Name of the GPU", examples=["NVIDIA GeForce RTX 4060"])
     gpu_allocated_mb: Optional[int] = Field(None, description="GPU memory currently allocated (MB)")
-    gpu_reserved_mb: Optional[int] = Field(None, description="GPU memory currently reserved by PyTorch (MB)")
+    gpu_reserved_mb: Optional[int] = Field(None, description="GPU memory currently reserved (MB)")
     worker_alive: Optional[bool] = Field(None, description="Not used (compatibility with qwen3-asr)")
     subsystems: Optional[dict] = Field(None, description="Status of each subsystem: stt_en, stt_zh")
 

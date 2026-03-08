@@ -2,7 +2,6 @@ FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
 
 WORKDIR /app
 
-ENV PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 ENV OMP_NUM_THREADS=1
 ENV MKL_NUM_THREADS=1
 
@@ -11,7 +10,6 @@ ENV ONNXRUNTIME_SESSION_GRAPH_OPTIMIZATION_LEVEL=99
 ENV ONNXRUNTIME_EXECUTION_MODE=1
 
 # All model caches under one tree for easy bind-mounting
-ENV HF_HOME=/data/cache/huggingface
 ENV MOONSHINE_VOICE_CACHE=/data/cache/moonshine
 
 # System dependencies

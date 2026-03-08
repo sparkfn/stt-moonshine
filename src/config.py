@@ -3,6 +3,8 @@ import os
 import sys
 from logger import log
 
+TARGET_SR = 16000
+
 
 def _safe_int(name: str, default: str) -> int:
     raw = os.getenv(name, default)

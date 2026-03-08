@@ -3,9 +3,8 @@ from __future__ import annotations
 import time
 import numpy as np
 from logger import log
+from config import TARGET_SR
 import models
-
-TARGET_SR = 16000
 
 
 def process_audio(

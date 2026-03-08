@@ -6,6 +6,7 @@ import time
 import threading
 import numpy as np
 from logger import log
+from config import TARGET_SR
 
 _model_rw_lock = threading.Lock()
 
@@ -14,8 +15,6 @@ _moonshine_zh = None
 _models_loaded = False
 _last_used = 0.0
 _numpy_input = False  # detected at warmup: can moonshine accept numpy directly?
-
-TARGET_SR = 16000
 
 
 def _resolve_model(env_var: str, fallback_lang: str):
