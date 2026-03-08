@@ -196,6 +196,9 @@ def is_speech(audio_float32: np.ndarray, threshold: float = 0.5) -> bool:
     if len(audio_float32) < VAD_FRAME_SAMPLES:
         return True
     try:
+        # Reset hidden state — is_speech is called on independent audio clips,
+        # not a continuous stream, so stale RNN state would corrupt results
+        _vad_model.reset_states()
         # Check up to 4 evenly-spaced frames across the audio
         n = len(audio_float32)
         num_frames = min(4, n // VAD_FRAME_SAMPLES)
@@ -222,6 +225,7 @@ def vad_confidence(audio_float32: np.ndarray) -> float:
     if len(audio_float32) < VAD_FRAME_SAMPLES:
         return 1.0
     try:
+        _vad_model.reset_states()
         # Check last frame for a quick confidence estimate
         frame = audio_float32[-VAD_FRAME_SAMPLES:]
         frame_buf = _torch.zeros(1, VAD_FRAME_SAMPLES)
@@ -281,8 +285,8 @@ class StreamingVAD:
             from silero_vad import load_silero_vad
             self._vad = load_silero_vad()
             self._vad.eval()
-        except Exception:
-            pass  # falls back to global _vad_model
+        except Exception as e:
+            log.bind(error=str(e)).warning("streaming_vad_load_failed_using_global")
 
     def reset(self) -> None:
         """Reset VAD state for a new utterance."""
