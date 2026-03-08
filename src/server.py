@@ -553,10 +553,6 @@ async def websocket_transcribe(websocket: WebSocket):
         return
 
     chunk_count = 0
-    streaming_vad = models.StreamingVAD(
-        positive_threshold=0.3, negative_threshold=0.25,
-        redemption_ms=400, min_speech_ms=250,
-    ) if use_vad else None
 
     # Timeout for receive() when VAD speech is active — if no audio arrives
     # within this window, assume the client stopped sending and force speech_end.
@@ -571,6 +567,12 @@ async def websocket_transcribe(websocket: WebSocket):
 
     try:
         await _ensure_model_loaded()
+
+        # Create StreamingVAD AFTER models are loaded — deepcopy needs _vad_model
+        streaming_vad = models.StreamingVAD(
+            positive_threshold=0.3, negative_threshold=0.25,
+            redemption_ms=400, min_speech_ms=250,
+        ) if use_vad else None
 
         await _ws_send_text(_json_encode({
             "status": "connected",
