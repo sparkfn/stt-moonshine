@@ -1,3 +1,5 @@
+> **COMPLETED:** This refactor was implemented in commit `34150b8` (2026-03-09). VAD, LID, and denoise are fully removed. WebSocket VAD-gated mode added in `10cd45d`.
+
 # Strip VAD/LID/Denoise — Transcription-Only Refactor
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.

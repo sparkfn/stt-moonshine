@@ -1,3 +1,5 @@
+> **ARCHIVED:** This design doc describes the original pipeline with VAD, LID, and denoise components. These were stripped in commit `34150b8` (2026-03-09). See `2026-03-08-strip-vad-lid-denoise.md` for the refactor plan and the current README for up-to-date architecture.
+
 # Moonshine ASR Service Design
 
 ## Goal

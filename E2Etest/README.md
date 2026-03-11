@@ -1,6 +1,6 @@
-# E2E Test Suite for Qwen3-ASR
+# E2E Test Suite for Moonshine-ASR
 
-End-to-end tests for the Qwen3-ASR speech-to-text server.
+End-to-end tests for the Moonshine-ASR speech-to-text server.
 
 ## Quick Start
 
@@ -89,10 +89,11 @@ E2E_API_KEY=your_key pytest E2Etest/
 
 ### WebSocket Tests (`test_websocket.py`)
 - Connection and handshake
-- Audio streaming
+- Audio streaming and partial transcriptions
 - Control commands (flush, reset, config)
-- Overlap handling
-- File streaming
+- Auto-reset on audio gap
+- Duplicate suppression
+- Buffer-only mode (`WS_PARTIAL=false`)
 
 ### Performance Tests (`test_performance.py`)
 - Cold start latency
@@ -102,15 +103,13 @@ E2E_API_KEY=your_key pytest E2Etest/
 
 ### Integration Tests (`test_integration.py`)
 - Priority queue (WS vs HTTP)
-- Dual model strategy
-- Quantization (INT8/FP8)
+- Dual model (EN + ZH) routing
 - Idle timeout behavior
 - Feature combinations
 
 ### Accuracy Tests (`test_accuracy.py`)
 - Word Error Rate (if reference data available)
 - Repetition detection
-- Language detection
 - Output format validation
 
 ## Test Audio
@@ -118,31 +117,6 @@ E2E_API_KEY=your_key pytest E2Etest/
 Test audio files (sine tones, speech-like signals, noise) are **auto-generated** on first run via a session-scoped autouse fixture. No manual setup needed. Generated files are gitignored.
 
 To regenerate manually: `python -c "import sys; sys.path.insert(0, 'E2Etest'); from utils.audio import generate_test_audio_files; generate_test_audio_files('E2Etest/data/audio', force=True)"`
-
-## Last Verified Results
-
-**85 collected, 75 passed, 10 skipped** (RTX 4060, Qwen3-ASR-0.6B, ~153s)
-
-Skipped tests require special configuration:
-- 2 tests: `DUAL_MODEL=true`
-- 3 tests: `QUANTIZE=int8` or `fp8`
-- 2 tests: `IDLE_TIMEOUT` (takes 120+ seconds)
-- 2 tests: `return_timestamps=True` (server lacks `forced_aligner`)
-- 1 test: Reference transcript file (`data/expected/*.txt`)
-
-## Writing New Tests
-
-```python
-import pytest
-from utils.client import ASRHTTPClient
-
-@pytest.mark.smoke
-def test_my_feature(ensure_server, sample_audio_5s):
-    """Description of what this test checks."""
-    with ASRHTTPClient() as client:
-        result = client.transcribe(sample_audio_5s)
-        assert "text" in result
-```
 
 ## Troubleshooting
 
@@ -159,7 +133,3 @@ def test_my_feature(ensure_server, sample_audio_5s):
 ### WebSocket tests failing
 - Check server supports WebSocket: `/ws/transcribe`
 - Verify no proxy/firewall blocking WebSocket
-
-### Performance tests failing
-- Adjust thresholds in tests based on your hardware
-- GPU tests require NVIDIA GPU with CUDA

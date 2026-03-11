@@ -12,25 +12,25 @@ Drop-in replacement for [qwen3-asr](https://github.com/jaaacki/qwen3-asr) — sa
 - **Real-time WebSocket** — `WS /ws/transcribe` accepts raw PCM audio for live transcription with sliding window (up to 6s context) and cumulative partials
 - **Dual-language** — English and Chinese via language-routed Moonshine ONNX models
 
-### Voice Pipeline
+### Pipeline
 ```
-audio -> noisereduce -> silero_vad -> speech_chunk -> language_detection -> router -> moonshine_en / moonshine_zh -> transcript
+audio -> language router -> moonshine_en / moonshine_zh -> transcript
 ```
 
 | Component | Model | Purpose |
 |-----------|-------|---------|
-| Noise suppression | noisereduce | Stationary noise reduction |
-| Voice activity | Silero VAD v6 | Speech/silence detection, auto-flush |
-| Language ID | SpeechBrain VoxLingua107 (ECAPA-TDNN) | 107-language classifier, routes to en/zh |
 | STT (English) | Moonshine medium-streaming-en (quantized) | ONNX Runtime inference |
 | STT (Chinese) | Moonshine base-zh (quantized) | ONNX Runtime inference |
 
+Language is set by the client (via request param or WebSocket config action). Defaults to English when unspecified.
+
 ### Real-Time WebSocket
 - **Sliding window** — re-transcribes up to 6s of accumulated audio each trigger for full context
-- **Server-side VAD** — Silero VAD auto-flushes on speech-to-silence transitions; skips inference for silence
-- **Per-connection VAD toggle** — clients can disable via query param (`?use_server_vad=false`) or mid-session config action
-- **Silence padding** — 600ms silence appended on flush to commit trailing words
-- **Control commands** — `flush`, `reset`, `config` (set language, toggle VAD)
+- **Buffer-only mode** — when `WS_PARTIAL=false`, audio accumulates without transcription until flush (ideal for VAD-gated upstream pipelines)
+- **Auto-reset** — clears window when no audio arrives for `WS_AUTO_RESET_MS` (default 800ms)
+- **Duplicate suppression** — skips sending partials identical to the last finalized transcript
+- **Silence padding** — configurable silence appended on flush to commit trailing words
+- **Control commands** — `flush`, `reset`, `config` (set language)
 
 ### Performance
 - **Priority scheduling** — WebSocket requests (priority 0) preempt HTTP uploads (priority 1) via min-heap queue
@@ -47,8 +47,8 @@ audio -> noisereduce -> silero_vad -> speech_chunk -> language_detection -> rout
 
 ```bash
 # Clone and start
-git clone https://github.com/jaaacki/moonshine-asr.git
-cd moonshine-asr
+git clone https://github.com/sparkfn/stt-moonshine.git
+cd stt-moonshine
 cp .env.example .env   # Adjust settings as needed
 docker compose up -d
 
@@ -105,18 +105,18 @@ asyncio.run(stream())
 
 **Connect:** `ws://host:port/ws/transcribe`
 
-Query params: `sample_rate` (8000 or 16000), `use_server_vad` (true/false), `request_id`
+Query params: `sample_rate` (8000 or 16000), `request_id`
 
 **Send:**
 - Binary frames: raw PCM audio (16-bit LE, mono)
 - JSON commands: `{"action": "flush"}`, `{"action": "reset"}`, `{"action": "config", "language": "en"}`
 
 **Receive:**
-- Handshake: `{"status": "connected", "sample_rate": 16000, "format": "pcm_s16le", "buffer_size": ..., "window_max_s": 6.0}`
-- Partial: `{"text": "...", "is_partial": true, "is_final": false}`
-- Final: `{"text": "...", "is_partial": false, "is_final": true}`
+- Handshake: `{"status": "connected", "sample_rate": 16000, "format": "pcm_s16le", "buffer_size": ..., "window_max_s": 6.0, "partial": true}`
+- Partial: `{"text": "...", "language": "en", "is_partial": true, "is_final": false}`
+- Final: `{"text": "...", "language": "en", "is_partial": false, "is_final": true}`
 - Reset ack: `{"status": "buffer_reset"}`
-- Config ack: `{"status": "configured", "language": "en", "use_server_vad": true}`
+- Config ack: `{"status": "configured", "language": "en"}`
 
 ## Configuration
 
@@ -127,16 +127,14 @@ Copy `.env.example` to `.env` and adjust:
 | `PORT` | `8200` | Host port mapping |
 | `MOONSHINE_EN_MODEL` | `en` | English model: language code to auto-download, or explicit path |
 | `MOONSHINE_ZH_MODEL` | `zh` | Chinese model: language code to auto-download, or explicit path |
-| `STT_DEVICE` | `auto` | ONNX Runtime device (auto/cpu/cuda) — informational only |
-| `VAD_DEVICE` | `cpu` | Silero VAD device |
-| `LID_DEVICE` | `cpu` | SpeechBrain LID device (cpu/cuda/auto) |
-| `DENOISE_DEVICE` | `cpu` | Noise reduction device |
-| `DENOISE_ENABLED` | `true` | Enable/disable noise reduction |
+| `STT_DEVICE` | `auto` | ONNX Runtime device hint (auto/cpu/cuda) — informational, ONNX RT selects provider |
 | `REQUEST_TIMEOUT` | `300` | Max seconds per inference request |
 | `IDLE_TIMEOUT` | `0` | Seconds before unloading idle models (0 = never) |
 | `LOG_LEVEL` | `info` | Logging level (trace/debug/info/warning/error) |
 | `WS_WINDOW_MAX_S` | `6.0` | WebSocket sliding window max duration (seconds) |
-| `ASR_USE_SERVER_VAD` | `true` | Default server-side VAD for WebSocket connections |
+| `WS_PARTIAL` | `true` | Enable partial transcriptions; `false` = buffer-only mode (transcribe on flush only) |
+| `WS_AUTO_RESET_MS` | `800` | Auto-reset window after this many ms of no audio (0 = disabled) |
+| `WS_FLUSH_PAD_SILENCE` | same as `WS_PARTIAL` | Pad silence on flush for trailing context |
 | `SSE_CHUNK_SECONDS` | `5` | SSE chunk duration for long audio |
 | `SSE_OVERLAP_SECONDS` | `1` | SSE chunk overlap for context continuity |
 
@@ -150,13 +148,15 @@ moonshine-asr/
   .env.example        # Configuration template
   src/
     server.py         # FastAPI app, all endpoints, WebSocket handler, priority queue
-    models.py         # Model loading: Silero VAD, SpeechBrain LID, Moonshine EN/ZH
-    pipeline.py       # Voice pipeline: denoise -> VAD -> LID -> route -> STT
+    models.py         # Model loading: Moonshine EN/ZH (ONNX Runtime)
+    pipeline.py       # Transcription pipeline: language routing + inference
     schemas.py        # Pydantic request/response models
     config.py         # Environment variable validation
     logger.py         # Loguru structured JSON logging
     errors.py         # Error response helper
-  models/             # HuggingFace cache (auto-populated on first run)
+  data/
+    cache/            # Model cache (auto-populated on first run)
+    logs/             # Application logs
 ```
 
 ## Differences from qwen3-asr
@@ -164,7 +164,7 @@ moonshine-asr/
 | Feature | qwen3-asr | moonshine-asr |
 |---------|-----------|---------------|
 | STT model | Qwen3-ASR-1.7B (PyTorch) | Moonshine EN + ZH (ONNX Runtime) |
-| Language detection | Built-in (Qwen3) | SpeechBrain VoxLingua107 |
+| Language detection | Built-in (Qwen3) | Client-specified (upstream LID or manual) |
 | Languages | en, zh, ja, yue, hi, th | en, zh (others routed to en) |
 | Subtitles | Full SRT generation | Stub (501) |
 | Translation | LLM-backed translation | Stub (501) |
